@@ -6,7 +6,7 @@
 - `CI required`가 성공하고 main 최신 변경을 반영한 뒤 squash merge합니다.
 - 리뷰 대화를 모두 해결합니다. merge 후 브랜치는 자동 삭제합니다.
 - 담당자가 정해지면 조직 팀을 만들고 CODEOWNERS를 추가합니다. 임의 담당자 배정은 하지 않습니다.
-- `preview-ready`와 `preview-sha-*`는 자동화가 관리합니다. 수동 편집하지 마세요.
+- `preview-ready`와 `sha-*`는 자동화가 관리합니다. 수동 편집하지 마세요.
 - AWS 키, kubeconfig, 실제 DB 데이터, `.env`는 커밋하지 않습니다.
 
 저장소 최초 초기화만 main에 직접 기록하며, 이후에는 관리자도 동일한 PR 규칙을 따릅니다.
