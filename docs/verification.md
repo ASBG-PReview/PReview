@@ -14,3 +14,13 @@
 로컬 Docker Engine은 초기 점검 당시 꺼져 있었으므로 실제 컨테이너 검증은 GitHub hosted runner에서 수행합니다.
 
 AWS ECR/EKS, Ingress, DNS와 PR Open→Update→Close 클러스터 Lifecycle은 아직 검증 대상입니다. `preview-ready` 라벨만으로 클러스터 배포 완료를 판단하지 않습니다.
+
+GitHub 저장소 운영 설정 확인:
+
+- 무료 Organization `ASBG-PReview`, 공개 저장소 `PReview`.
+- main Ruleset 활성화: 일반 팀원은 승인 1명 + CI required + 리뷰 대화 해결.
+- 관리자는 PR 병합에만 bypass 가능. bypass 활성화 이후에도 직접 push가 GH013으로 거부됨을 확인.
+- squash merge만 허용하고 병합된 브랜치는 자동 삭제.
+- Actions 기본 토큰 read-only, `preview-publish` Environment는 main만 허용.
+- Dependabot 보안 업데이트, Secret scanning, Secret push protection 활성화.
+- AWS_PREVIEW_ENABLED=false: AWS 역할과 클러스터 연결 전에는 클라우드 작업을 수행하지 않음.
