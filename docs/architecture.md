@@ -21,7 +21,7 @@
 - Publish: 성공한 `workflow_run`, 저장소·PR·SHA·작성자 권한을 다시 검증. main의 스크립트만 실행하고 빌드 산출물은 load/tag/push만 수행합니다.
 - Fork/Dependabot: 테스트는 가능하지만 자동 발행 대상에서 제외됩니다.
 - AWS: `preview-publish` Environment와 OIDC 사용. PR 코드에 AWS 자격증명을 전달하지 않습니다.
-- GitOps: `preview-ready`로 최초 생성 여부를, `preview-sha-*`로 성공한 이미지 버전을 선택합니다.
+- GitOps: `preview-ready`로 최초 생성 여부를, `sha-*`로 성공한 이미지 버전을 선택합니다.
 
 `head_sha`를 그대로 ApplicationSet 이미지 태그로 쓰면 새 커밋이 올라온 순간 아직 없는 이미지로 전환됩니다. 이 구현은 마지막 성공한 SHA를 라벨에 저장하여 빌드 실패 시 기존 환경을 유지합니다. 발행 종료 직전 PR 상태와 head를 재확인해 오래된 실행이 최신 결과를 덮지 않게 합니다. PR 상태와 라벨 변경은 GitHub의 원자적 트랜잭션이 아니므로 아주 짧은 경합은 가능하나, 라벨은 항상 실제 발행된 이미지만 가리킵니다.
 

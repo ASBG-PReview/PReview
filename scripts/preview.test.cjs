@@ -15,7 +15,12 @@ test('stale, closed, draft, fork and failed runs cannot publish', () => {
   assert.equal(selectPreview(run,[pr,pr],repository),null);
 });
 test('published revision is unique and unrelated labels survive', () => {
-  assert.deepEqual(publishedLabels([{name:'bug'},{name:'preview-ready'},{name:`preview-sha-${'b'.repeat(40)}`}],sha),
-    ['bug','preview-ready',`preview-sha-${sha}`]);
+  assert.deepEqual(publishedLabels([{name:'bug'},{name:'preview-ready'},{name:`sha-${'b'.repeat(40)}`}],sha),
+    ['bug','preview-ready',`sha-${sha}`]);
   assert.throws(() => publishedLabels([], '$(bad)'));
+});
+test('revision labels fit the GitHub 50-character limit without truncating SHA', () => {
+  const labels = publishedLabels([],sha);
+  assert.ok(labels.every(label => label.length <= 50));
+  assert.equal(labels.find(label => label.startsWith('sha-')), `sha-${sha}`);
 });

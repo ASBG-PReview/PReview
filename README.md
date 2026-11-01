@@ -55,9 +55,9 @@ python -m uvicorn app.main:app --reload
 1. `codex/…`, `feat/…`, `fix/…` 브랜치에서 PR을 엽니다.
 2. Python 테스트, Helm 렌더링, 실제 Docker 실행 검증을 수행합니다.
 3. 같은 저장소의 권한 있는 작성자가 만든 PR은 성공한 CI 이미지가 GHCR로 발행됩니다.
-4. 이미지 준비 후 `preview-ready`, `preview-sha-<40자리 SHA>` 라벨을 기록합니다.
+4. 이미지 준비 후 `preview-ready`, `sha-<40자리 SHA>` 라벨을 기록합니다.
 5. Argo CD를 설치하면 해당 이미지로 환경을 생성·갱신하고 PR 종료 시 제거합니다.
-6. main 병합은 승인 1명, 최신 CI 통과, 대화 해결이 필요합니다. 관리자 우회도 허용하지 않습니다.
+6. 일반 팀원의 main 병합은 승인 1명, 최신 CI 통과, 대화 해결이 필요합니다. 관리자는 PR 병합 시 우회할 수 있으며 main 직접 push는 관리자도 차단됩니다.
 
 외부 fork와 Dependabot은 CI만 실행합니다. 발행 워크플로는 main의 코드만 실행하며 PR 코드를 실행하지 않습니다. `preview-ready`는 이미지 준비 완료이며 Kubernetes 배포 성공을 보장하지 않습니다.
 

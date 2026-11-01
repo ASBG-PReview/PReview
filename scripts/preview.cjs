@@ -12,8 +12,8 @@ function selectPreview(run, prs, repository) {
 function publishedLabels(labels, sha) {
   if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error('Invalid published SHA');
   const preserved = labels.map(label => typeof label === 'string' ? label : label.name)
-    .filter(name => name !== 'preview-ready' && !name.startsWith('preview-sha-'));
-  return [...new Set([...preserved, 'preview-ready', `preview-sha-${sha}`])];
+    .filter(name => name !== 'preview-ready' && !name.startsWith('sha-'));
+  return [...new Set([...preserved, 'preview-ready', `sha-${sha}`])];
 }
 
 module.exports = { selectPreview, publishedLabels };

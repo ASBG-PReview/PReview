@@ -4,7 +4,7 @@
 
 1. 브랜치를 만들고 `app/static/index.html`의 소개 문구를 바꿔 PR을 엽니다.
 2. CI의 Python, Helm, Docker 검증 성공을 확인합니다.
-3. Publish preview 실행에서 GHCR 이미지 발행과 `preview-sha-*` 라벨을 확인합니다.
+3. Publish preview 실행에서 GHCR 이미지 발행과 `sha-*` 라벨을 확인합니다.
 4. main은 승인 없이는 병합되지 않고 직접 push도 차단되는지 확인합니다.
 
 ## EKS 연결 후 시연
