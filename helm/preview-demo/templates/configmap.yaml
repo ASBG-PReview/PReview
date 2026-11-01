@@ -1,9 +1,0 @@
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: preview-info
-  namespace: {{ .Release.Namespace }}
-data:
-  PR_NUMBER: {{ .Values.preview.prNumber | quote }}
-  COMMIT_SHA: {{ .Values.preview.commitSha | quote }}
-  PREVIEW_COLOR: {{ .Values.preview.color | quote }}
