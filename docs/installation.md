@@ -11,6 +11,7 @@ gh api --method POST repos/ASBG-PReview/PReview/rulesets --input .github/ruleset
 ```
 
 같은 이름의 규칙이 있으면 해당 ID로 PUT하여 갱신합니다. 새 규칙을 중복 생성하지 마세요.
+관리자(RepositoryRole 5)는 PR 병합에만 bypass가 허용됩니다. 직접 push는 계속 차단됩니다.
 기본 Actions 토큰은 읽기 권한이고 워크플로 job에 필요한 권한만 명시합니다.
 `preview-publish` Environment는 main 브랜치만 허용합니다.
 

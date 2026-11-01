@@ -7,7 +7,7 @@
 - ECR 정리: 닫힌 PR만 선택, 잘못된 태그 무시, GitHub 오류 시 중단.
 - Helm: 서로 다른 Namespace 렌더링, resource quota, probe, 읽기 전용 filesystem, NetworkPolicy.
 - Docker: 이미지를 실제 실행하여 health, PR 번호, SHA, Namespace, 화면을 검사.
-- main: 활성 Ruleset, 필수 체크, 승인 1명, 관리자 우회 없음.
+- main: 활성 Ruleset, 필수 체크, 승인 1명, 관리자 PR 병합 bypass, 관리자 직접 push 차단.
 
 ## AWS 연결 후 필수 E2E
 
