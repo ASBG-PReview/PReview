@@ -45,18 +45,34 @@ python -m pytest -q
 python -m uvicorn app.main:app --reload
 ```
 
-## 협업과 CI
+## PR 정책
 
-- 기능 브랜치에서 PR을 엽니다. Python 테스트와 Docker 빌드·실행 검증이 자동 수행됩니다.
-- main 병합 후 검증한 이미지를 `ghcr.io/asbg-preview/preview:sha-<전체 SHA>`로 발행합니다. Actions 실행 요약에서 태그를 확인합니다.
-- PR에서는 레지스트리 쓰기 권한을 사용하지 않습니다. 이미지 발행은 main의 별도 job에서만 수행합니다.
-- 일반 팀원은 승인 1명, `CI required` 통과, 리뷰 대화 해결 후 squash merge합니다.
-- 관리자는 **PR 병합에만 bypass**할 수 있습니다. main 직접 push·force push·삭제 차단은 GitHub Ruleset으로 유지합니다.
-- Dependabot, Secret scanning, 비밀정보 push 차단이 활성화되어 있습니다. 인증정보와 `.env`는 커밋하지 않습니다.
+`최신 main → 작업 브랜치 → PR → 리뷰·CI → Squash merge`
 
-GHCR 패키지는 비공개일 수 있으므로 로컬에서 이미지를 pull할 때에는 패키지 접근 권한이 필요할 수 있습니다.
+- `develop` 없이 작업별 `feat/…`, `fix/…`, `chore/…` 브랜치를 만듭니다. 한 PR에는 한 가지 목적만 담고, 작업 중에는 Draft로 공유합니다.
+- 준비되면 변경 이유와 검증 결과를 적고 작성자 외 1명에게 리뷰를 요청합니다. 중요한 오류는 수정하고, 취향 수준의 의견은 병합을 막지 않습니다.
+- 최신 main을 반영하고 CI·리뷰를 확인한 뒤 작성자가 Squash merge합니다. 병합한 브랜치는 자동 삭제되며 다음 작업은 새 브랜치에서 시작합니다.
+
+**GitHub가 강제하는 조건**
+
+| 조건 | 일반 팀원 | 관리자 |
+|---|---|---|
+| main 직접 push·force push·삭제 금지 | 필수 | 필수 |
+| PR + 최신 main 기준 `CI required` 통과 | 필수 | 필수, bypass 없음 |
+| 리뷰 대화 해결 + Squash merge | 필수 | 필수 |
+| 작성자 외 승인 1명, 변경 시 기존 승인 취소 | 필수 | 이 승인 조건만 PR에서 우회 가능 |
+
+관리자 우회 시 PR 본문에 이유를 남깁니다. 마지막 push 작성자 외의 별도 승인을 요구하지 않아 불필요한 제3자 리뷰를 피합니다.
+브랜치 이름·PR 크기·설명 충실도·우회 사유는 팀 약속이며 자동 검사하지 않습니다. 일반 팀원은 Write, 관리자는 최소 인원으로 운영합니다.
+규칙은 [GitHub Rulesets](https://github.com/ASBG-PReview/PReview/rules)에서 관리합니다. 관리자의 규칙 편집 권한 자체를 막는 설정은 아닙니다.
+
+## CI와 이미지
+
+PR에서 Python 테스트와 Docker 빌드·실행을 검사하고, main 병합 후 검증한 이미지를 `ghcr.io/asbg-preview/preview:sha-<전체 SHA>`로 발행합니다. 이미지 발행 권한은 main의 별도 job에서만 사용하며 태그는 Actions 실행 요약에서 확인합니다.
+GHCR 패키지는 비공개일 수 있습니다. Dependabot과 Secret scanning/push protection은 활성화되어 있으며 인증정보와 `.env`는 커밋하지 않습니다.
 
 ## 다음 단계
 
 AWS 연결 시 ECR/OIDC와 배포 방식을 정한 후 Helm·Argo CD 등 필요한 설정을 추가합니다. 지금은 PR 전용 URL이나 클러스터를 생성하지 않습니다.
+연결 초기에는 준비된 PR에 `preview` 라벨을 붙였을 때만 환경을 생성하고 Close/Merge 시 삭제할 계획입니다. Preview 배포 성공은 아직 병합 필수 조건이 아닙니다.
 이전에 준비한 AWS/GitOps 예시는 정리 전 커밋 `7c51d61`의 Git 이력에서 확인할 수 있습니다.
