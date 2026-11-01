@@ -1,0 +1,17 @@
+services:
+  demo:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    ports:
+      - "127.0.0.1:8000:8000"
+    environment:
+      PR_NUMBER: "${PR_NUMBER:-local}"
+      COMMIT_SHA: "${COMMIT_SHA:-local}"
+      POD_NAMESPACE: "${POD_NAMESPACE:-local}"
+      PREVIEW_COLOR: "${PREVIEW_COLOR:-blue}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]

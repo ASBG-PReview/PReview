@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PReview · PR Preview</title>
+<style>
+  :root { font: 16px system-ui,sans-serif; color: #e8eef7; background:#101827; }
+  body { max-width:760px; margin:12vh auto; padding:24px; }
+  h1 { font-size:clamp(40px,8vw,72px); margin:16px 0; letter-spacing:-.06em; }
+  p { color:#b4c4d8; line-height:1.7; }
+  article { border:1px solid #344155; border-radius:20px; padding:28px; }
+  dl { display:grid; grid-template-columns:100px 1fr; gap:16px; }
+  dd { margin:0; overflow-wrap:anywhere; font-family:monospace; }
+  #status { display:inline-block; padding:8px 12px; border-radius:24px; background:#25344c; }
+  body[data-color="blue"] article { border-top:4px solid #60a5fa; }
+  body[data-color="red"] article { border-top:4px solid #f87171; }
+</style>
+<body>
+<p>ASBG · PR 기반 임시 테스트 환경</p>
+<h1>PReview</h1>
+<p>이 PR의 변경을 독립된 환경에서 확인하세요.</p>
+<article>
+  <span id="status" role="status">상태 확인 중</span>
+  <dl><dt>Pull request</dt><dd id="pr">—</dd><dt>Commit</dt><dd id="sha">—</dd>
+  <dt>Namespace</dt><dd id="namespace">—</dd></dl>
+</article>
+<script>
+  async function refresh() {
+    try {
+      const [health, info] = await Promise.all([fetch('/health'), fetch('/pr-info')]);
+      if (!health.ok || !info.ok) throw new Error('API request failed');
+      const h = await health.json();
+      if (h.status !== 'ok') throw new Error('Unhealthy');
+      const data = await info.json();
+      document.querySelector('#status').textContent = '● Healthy';
+      document.querySelector('#pr').textContent = '#' + data.pr_number;
+      document.querySelector('#sha').textContent = data.commit_sha;
+      document.querySelector('#namespace').textContent = data.namespace;
+      document.body.dataset.color = data.color === 'red' ? 'red' : 'blue';
+    } catch {
+      document.querySelector('#status').textContent = '상태 확인 실패';
+    }
+  }
+  refresh(); setInterval(refresh, 10000);
+</script>
+</body>
+</html>

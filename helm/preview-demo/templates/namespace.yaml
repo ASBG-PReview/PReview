@@ -1,0 +1,13 @@
+{{- if not (regexMatch "^preview-pr-([1-9][0-9]*|local)$" .Release.Namespace) }}
+{{- fail "Namespace must be preview-pr-<positive PR number> or preview-pr-local" }}
+{{- end }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  labels:
+    app.kubernetes.io/part-of: preview
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

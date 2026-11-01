@@ -1,0 +1,29 @@
+preview:
+  prNumber: "local"
+  commitSha: "local"
+  color: blue
+image:
+  repository: ghcr.io/asbg-preview/preview
+  tag: local
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+quota:
+  requestsCpu: "1"
+  requestsMemory: 1Gi
+  limitsCpu: "2"
+  limitsMemory: 2Gi
+  pods: "5"
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  tlsSecretName: ""
+networkPolicy:
+  enabled: true

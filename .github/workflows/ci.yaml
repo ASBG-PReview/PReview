@@ -1,0 +1,96 @@
+name: CI
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  tests:
+    name: Python tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check . && ruff format --check .
+      - run: pytest -q
+      - run: node --test scripts/*.test.cjs
+  helm:
+    name: Helm validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.19.0
+      - run: helm lint helm/preview-demo --namespace preview-pr-local --strict
+      - run: |
+          helm template demo helm/preview-demo --namespace preview-pr-12 > /tmp/pr12.yaml
+          helm template demo helm/preview-demo --namespace preview-pr-15 --set ingress.enabled=true --set ingress.host=pr-15.preview.example.com > /tmp/pr15.yaml
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+      - run: pip install PyYAML==6.0.3
+      - run: python scripts/check_manifests.py /tmp/pr12.yaml /tmp/pr15.yaml
+  docker:
+    name: Docker smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Publish the actual PR head, not GitHub's synthetic merge SHA.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Build container
+        run: docker build -f app/Dockerfile -t preview-ci:build .
+      - name: Verify container and environment identity
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number || 'local' }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          docker run -d --name preview-smoke --read-only --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8000:8000 -e PR_NUMBER -e COMMIT_SHA -e POD_NAMESPACE=preview-smoke preview-ci:build
+          python scripts/smoke.py
+      - name: Container logs and cleanup
+        if: always()
+        run: |
+          docker logs preview-smoke || true
+          docker rm -f preview-smoke || true
+      - name: Export tested image
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        run: docker save preview-ci:build -o /tmp/preview-image.tar
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        with:
+          name: preview-image
+          path: /tmp/preview-image.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
+  required:
+    name: CI required
+    if: always()
+    needs: [tests, helm, docker]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require every check to pass
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          python -c 'import json,os; assert all(j["result"] == "success" for j in json.loads(os.environ["RESULTS"]).values()), os.environ["RESULTS"]'

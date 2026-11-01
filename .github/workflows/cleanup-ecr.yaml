@@ -1,0 +1,31 @@
+name: Cleanup closed PR images
+on:
+  schedule:
+    - cron: '37 18 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cleanup:
+    if: vars.AWS_PREVIEW_ENABLED == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: preview-publish
+    permissions:
+      contents: read
+      pull-requests: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Remove only closed PR image tags
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+        run: python scripts/cleanup_ecr.py
