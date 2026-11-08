@@ -1,0 +1,80 @@
+name: Publish verified PR preview
+on:
+  workflow_run:
+    workflows: [Build PR preview image]
+    types: [completed]
+permissions: {}
+defaults:
+  run:
+    shell: bash
+jobs:
+  publish:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.path == '.github/workflows/pr-build.yml' &&
+      github.event.workflow_run.head_repository.id == github.event.repository.id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      packages: write
+    outputs:
+      pushed: ${{ steps.push.outputs.pushed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }} # workflow_run uses the default branch
+          persist-credentials: false
+      - name: Match the build to a live PR and trusted build definition
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/preview_publish.py check
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        if: steps.gate.outputs.eligible == 'true'
+        with:
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          name: preview-image-${{ github.event.workflow_run.id }}-${{ github.event.workflow_run.run_attempt }}
+          path: ${{ runner.temp }}/preview-artifact
+      - name: Verify image metadata and publish without running PR code
+        if: steps.gate.outputs.eligible == 'true'
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ steps.gate.outputs.sha }}
+          IMAGE: ${{ steps.gate.outputs.image }}
+        run: |
+          source_image="docker-archive:$RUNNER_TEMP/preview-artifact/preview-image.tar"
+          skopeo inspect --config "$source_image" | jq -e \
+            '.config.Labels["org.opencontainers.image.revision"] == env.EXPECTED_SHA and
+             .config.Labels["org.opencontainers.image.source"] == (env.GITHUB_SERVER_URL + "/" + env.GITHUB_REPOSITORY)'
+          eligible=$(python scripts/preview_publish.py current)
+          if [[ "$eligible" != true ]]; then exit 0; fi
+          authfile="$RUNNER_TEMP/preview-ghcr-auth.json"
+          trap 'rm -f "$authfile"' EXIT
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$authfile" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          skopeo copy --authfile "$authfile" --digestfile "$RUNNER_TEMP/preview-digest" \
+            "$source_image" "docker://$IMAGE"
+          printf 'Published `%s` · `%s`\n' "$IMAGE" "$(cat "$RUNNER_TEMP/preview-digest")" >> "$GITHUB_STEP_SUMMARY"
+          echo 'pushed=true' >> "$GITHUB_OUTPUT"
+  label:
+    needs: publish
+    if: needs.publish.outputs.pushed == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Add preview label to the current PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/preview_publish.py label

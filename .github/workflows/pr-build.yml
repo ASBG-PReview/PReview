@@ -1,0 +1,56 @@
+name: Build PR preview image
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+concurrency:
+  group: preview-build-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  build:
+    if: >-
+      github.event.pull_request.head.repo.id == github.event.repository.id &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.actor != 'dependabot[bot]'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+      NAMESPACE: preview-pr-${{ github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Build Spring Boot image
+        run: |
+          test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
+          docker build --label "org.opencontainers.image.revision=$COMMIT_SHA" \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            -t preview-build:tested ./preview-api
+      - name: Verify health and PR identity on port 8080
+        run: |
+          docker run -d --name preview-smoke --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:18080:8080 -e PR_NUMBER -e COMMIT_SHA -e NAMESPACE preview-build:tested
+          curl -fsS --retry 30 --retry-all-errors --retry-delay 2 --max-time 5 \
+            http://127.0.0.1:18080/health | jq -e '.status == "ok"'
+          curl -fsS --max-time 5 http://127.0.0.1:18080/environment | \
+            jq -e '.prNumber == env.PR_NUMBER and .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE'
+      - name: Remove smoke container
+        if: always()
+        run: docker rm -f preview-smoke || true
+      - name: Export tested image
+        run: docker save -o "$RUNNER_TEMP/preview-image.tar" preview-build:tested
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: preview-image-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/preview-image.tar
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error
