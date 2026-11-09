@@ -7,7 +7,7 @@ PR별 미리보기 환경에 사용하는 Java 21 Spring Boot 서비스입니다
 저장소 루트에서 실행합니다. `/health`의 정상 상태는 `ok`입니다. `/environment`는 `PR_NUMBER`, `COMMIT_SHA`, `NAMESPACE`를 반환하며 Compose 기본값은 모두 `local`입니다.
 
 ```sh
-docker compose up --build -d
+docker compose up --build --wait -d
 curl http://localhost:8080/health
 curl http://localhost:8080/environment
 docker compose down
@@ -20,6 +20,8 @@ docker compose down
 | main 대상 PR | 필수 CI는 병합 예정 코드의 JUnit, HTTP 응답, 발행 정책, 임시 레지스트리 발행·재시도·digest를 검사합니다. |
 | 같은 저장소의 일반 앱 PR | 별도 워크플로가 PR의 최신 커밋을 빌드합니다. 보호된 main과 빌드 정의가 일치하면 `ghcr.io/asbg-preview/preview:pr-<번호>-<전체 SHA>`를 발행하고 검증 기록에 서명한 뒤 `preview` 라벨을 붙입니다. |
 | main에 push | 필수 CI를 통과한 이미지 파일을 `ghcr.io/asbg-preview/preview:sha-<전체 main SHA>`로 발행합니다. |
+
+같은 PR 커밋을 재빌드해 이미지 내용이 달라지면 보호된 워크플로가 같은 PR·SHA에 대해 미리 서명한 기존 digest만 재사용합니다. 기존 태그는 덮어쓰지 않습니다.
 
 발행 정책을 수정할 때는 Node.js 22 이상에서 `node --test tests/preview-publish.test.mjs`를 실행합니다. 별도 패키지 설치는 필요 없습니다.
 

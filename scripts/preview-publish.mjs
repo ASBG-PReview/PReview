@@ -9,6 +9,7 @@ import { recipe } from './stage-preview.mjs';
 const buildPath = '.github/workflows/pr-build.yml';
 const publishPath = '.github/workflows/pr-publish.yml';
 const receiptName = 'preview-publication.json';
+const intentName = 'preview-intent.json';
 const bot = 'dependabot[bot]';
 const fullSha = /^[0-9a-f]{40}$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
@@ -41,6 +42,15 @@ export function receipt(repo, pr, digest, runId, attempt) {
   return JSON.stringify({
     digest, head_sha: pr.head.sha, image: imageTag(repo, pr), pr: pr.number,
     repository_id: repo.id, run_attempt: attempt, run_id: runId, version: 1,
+  }) + '\n';
+}
+
+export function intent(repo, pr, digest) {
+  if (!digestPattern.test(digest)) throw new Error('Invalid publication intent digest');
+  // This proof survives retries. Its purpose distinguishes it from the run-specific receipt.
+  return JSON.stringify({
+    digest, head_sha: pr.head.sha, image: imageTag(repo, pr), pr: pr.number,
+    purpose: 'preview-publication-intent', repository_id: repo.id, version: 1,
   }) + '\n';
 }
 
@@ -124,14 +134,20 @@ export class Publisher {
         run.head_branch !== repo.default_branch || !fullSha.test(run.head_sha)) {
       throw new Error('Not a successful default-branch publisher attempt');
     }
+    this.verifySignature(repo, receiptName, bytes, run.head_sha);
+  }
+
+  verifySignature(repo, name, bytes, sourceSha) {
     const ref = 'refs/heads/' + repo.default_branch;
-    const dir = mkdtempSync(join(tmpdir(), 'preview-receipt-'));
+    const dir = mkdtempSync(join(tmpdir(), 'preview-proof-'));
     try {
-      const file = join(dir, receiptName);
+      const file = join(dir, name);
       writeFileSync(file, bytes);
-      this.command('gh', ['attestation', 'verify', file, '--repo', repo.full_name,
-        '--cert-identity', repo.html_url + '/' + publishPath + '@' + ref, '--source-ref', ref,
-        '--source-digest', run.head_sha, '--deny-self-hosted-runners'], { stdio: ['ignore', 'ignore', 'inherit'] });
+      const args = ['attestation', 'verify', file, '--repo', repo.full_name,
+        '--cert-identity', repo.html_url + '/' + publishPath + '@' + ref, '--source-ref', ref];
+      if (sourceSha) args.push('--source-digest', sourceSha);
+      args.push('--deny-self-hosted-runners');
+      this.command('gh', args, { stdio: ['ignore', 'ignore', 'inherit'] });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -169,6 +185,13 @@ export class Publisher {
     const pr = candidateFor(event);
     const runId = Number(env.GITHUB_RUN_ID);
     const attempt = Number(env.GITHUB_RUN_ATTEMPT);
+    if (mode === 'intent' || mode === 'verify-intent') {
+      if (!pr) throw new Error('Cannot authorize an unrelated workflow run');
+      const bytes = intent(repo, pr, env.PREVIEW_DIGEST);
+      if (mode === 'intent') writeFileSync(join(env.RUNNER_TEMP, intentName), bytes);
+      else this.verifySignature(repo, intentName, bytes);
+      return;
+    }
     if (mode === 'receipt') {
       if (!pr) throw new Error('Cannot sign an unrelated workflow run');
       writeFileSync(join(env.RUNNER_TEMP, receiptName), receipt(repo, pr, env.PREVIEW_DIGEST, runId, attempt));

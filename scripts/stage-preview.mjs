@@ -26,6 +26,7 @@ export function stage(base, destination) {
   if (!/^[0-9a-f]{40}$/.test(base)) throw new Error('Expected a full base SHA');
   const head = tree('HEAD');
   const parent = tree(base);
+  const bootstrap = !parent.has('Dockerfile');
   mkdirSync(destination);
   for (const name of new Set([...recipe, ...head.keys()])) {
     if (localOnly.has(name)) continue;
@@ -37,8 +38,10 @@ export function stage(base, destination) {
     if (file?.kind !== 'blob' || !['100644', '100755'].includes(file.mode)) {
       throw new Error('Expected a committed regular file: ' + name);
     }
-    // Only the initial read-only build can introduce the Dockerfile.
-    if (recipe.includes(name) && !(name === 'Dockerfile' && !parent.has(name))) {
+    // The initial read-only build introduces Docker and its Gradle verification task together.
+    // Publication independently requires identical recipes on main and both PR parents.
+    const initialRecipe = bootstrap && ['Dockerfile', 'build.gradle'].includes(name);
+    if (recipe.includes(name) && !initialRecipe) {
       const trusted = parent.get(name);
       if (file.oid !== trusted?.oid || file.mode !== trusted.mode) {
         throw new Error('Build recipe differs from base: ' + name);

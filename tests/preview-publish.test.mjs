@@ -204,6 +204,37 @@ for (const [scenario, error] of [
 
 const script = name => fileURLToPath(new URL('../scripts/' + name, import.meta.url));
 
+test('a cold retry recovers only the signed PR-specific digest across publisher attempts', t => {
+  const dir = temp(t);
+  const pub = publisher();
+  const original = event();
+  const expected = Buffer.from('{"digest":"' + digest + '","head_sha":"' + sha + '","image":"' + tag +
+    '","pr":17,"purpose":"preview-publication-intent","repository_id":4,"version":1}\n');
+  const env = { RUNNER_TEMP: dir, PREVIEW_DIGEST: digest, GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '1' };
+  pub.handle('intent', original, env);
+  const signedIntent = readFileSync(join(dir, 'preview-intent.json'));
+  assert.deepEqual(signedIntent, expected);
+  pub.command = (tool, args) => {
+    assert.equal(tool, 'gh');
+    assert.deepEqual(args.slice(0, 2), ['attestation', 'verify']);
+    assert.deepEqual(args.slice(3), ['--repo', repo.full_name, '--cert-identity',
+      repo.html_url + '/' + publishPath + '@refs/heads/main', '--source-ref', 'refs/heads/main',
+      '--deny-self-hosted-runners']);
+    if (!readFileSync(args[2]).equals(signedIntent)) throw new Error('no signed publication intent');
+  };
+  const retry = { ...env, GITHUB_RUN_ID: '99', GITHUB_RUN_ATTEMPT: '2' };
+  pub.handle('verify-intent', original, retry);
+  assert.throws(() => pub.handle('verify-intent', original,
+    { ...retry, PREVIEW_DIGEST: digestOf('different registry digest') }), /no signed publication intent/);
+  const other = event();
+  other.workflow_run.pull_requests[0].number++;
+  assert.throws(() => pub.handle('verify-intent', other, retry), /no signed publication intent/);
+  other.workflow_run.pull_requests[0].number--;
+  other.workflow_run.head_sha = other.workflow_run.pull_requests[0].head.sha = 'c'.repeat(40);
+  assert.throws(() => pub.handle('verify-intent', other, retry), /no signed publication intent/);
+  assert.throws(() => pub.handle('verify-intent', original, { ...retry, PREVIEW_DIGEST: 'bad' }), /digest/);
+});
+
 test('receipt CLI writes the exact signed v1 bytes', t => {
   const dir = temp(t);
   const path = join(dir, 'event.json');
