@@ -1,4 +1,4 @@
-FROM gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7 AS distribution
+FROM gradle:9.8.2-jdk21@sha256:85f8f572045bfb31874d66d7d8a2bd0c17d8cb9ad34b6a4d02f5d552b4b92c04 AS distribution
 
 FROM eclipse-temurin:21-jdk AS packaged
 COPY --from=distribution /opt/gradle /opt/gradle
