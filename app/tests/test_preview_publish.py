@@ -1,6 +1,7 @@
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -13,7 +14,12 @@ SHA = "abc01234" * 5
 
 @pytest.fixture
 def event():
-    repo = {"id": 4, "default_branch": "main", "full_name": "ASBG-PReview/PReview"}
+    repo = {
+        "id": 4,
+        "default_branch": "main",
+        "full_name": "ASBG-PReview/PReview",
+        "html_url": "https://github.com/ASBG-PReview/PReview",
+    }
     pr = {
         "number": 17,
         "head": {"repo": repo, "sha": SHA},
@@ -144,6 +150,7 @@ def test_delayed_run_must_match_current_pr(event, change):
 
 
 DIGEST = "sha256:" + hashlib.sha256(b"manifest").hexdigest()
+FORGED_DIGEST = "sha256:" + hashlib.sha256(b"forged manifest").hexdigest()
 
 
 @pytest.mark.parametrize("race", ["before", "during", "already labeled", "stable"])
@@ -163,12 +170,15 @@ def test_label_race_is_bound_to_original_commit(event, monkeypatch, race):
     ]
     api = Mock(side_effect=replies)
     monkeypatch.setattr(publish, "api", api)
-    monkeypatch.setenv("GITHUB_SERVER_URL", "https://github.com")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
     monkeypatch.setenv("GITHUB_RUN_ID", "42")
     monkeypatch.setattr(publish, "ensure_label", Mock())
     publish.record_and_label(root, candidate, event["repository"], DIGEST)
     assert api.call_args_list[0].args[0] == f"{root}/statuses/{SHA}"
     assert api.call_args_list[0].args[1]["description"] == DIGEST
+    assert api.call_args_list[0].args[1]["target_url"] == (
+        "https://github.com/ASBG-PReview/PReview/actions/runs/42/attempts/1"
+    )
     if race == "during":
         api.assert_called_with(f"{root}/issues/17/labels/preview", delete=True)
     elif race in {"before", "already labeled"}:
@@ -189,6 +199,15 @@ def test_label_race_is_bound_to_original_commit(event, monkeypatch, race):
         "registry changed",
         "untrusted writer",
         "failed",
+        "unrelated workflow",
+        "wrong publisher branch",
+        "wrong attempt",
+        "unfinished publisher",
+        "failed publisher",
+        "missing target",
+        "other repository",
+        "unsigned receipt",
+        "replayed proof for another digest",
     ],
 )
 def test_resolve_requires_matching_readiness(event, monkeypatch, case):
@@ -197,17 +216,76 @@ def test_resolve_requires_matching_readiness(event, monkeypatch, case):
     requested = "b" * 40 if case in {"stale", "new head"} else SHA
     if case == "new head":
         live["head"] = dict(live["head"], sha=requested)
+    repository = event["repository"]
+    expected_receipt = {
+        "version": 1,
+        "repository_id": repository["id"],
+        "image": f"ghcr.io/asbg-preview/preview:pr-17-{SHA}",
+        "pr": 17,
+        "head_sha": SHA,
+        "digest": DIGEST,
+        "run_id": 42,
+        "run_attempt": 2,
+    }
+    target = repository["html_url"] + "/actions/runs/42/attempts/2"
     row = {
+        "target_url": None if case == "missing target" else target,
         "creator": {"login": "other" if case == "untrusted writer" else "github-actions[bot]"},
         "state": "failure" if case == "failed" else "success",
-        "description": "bad" if case == "bad digest" else DIGEST,
+        "description": "bad"
+        if case == "bad digest"
+        else (FORGED_DIGEST if case == "replayed proof for another digest" else DIGEST),
         "context": publish.status_context(18 if case == "other PR" else 17),
     }
-    api = Mock(side_effect=[event["repository"], [] if case == "new head" else [row], live])
+    publisher = {
+        "id": 42,
+        "run_attempt": 1 if case == "wrong attempt" else 2,
+        "status": "in_progress" if case == "unfinished publisher" else "completed",
+        "conclusion": "failure" if case == "failed publisher" else "success",
+        "event": "workflow_run",
+        "workflow_id": 77,
+        "path": ".github/workflows/ci.yaml"
+        if case == "unrelated workflow"
+        else publish.PUBLISH_PATH,
+        "repository": repository,
+        "head_repository": {"id": 123} if case == "other repository" else repository,
+        "head_branch": "topic" if case == "wrong publisher branch" else "main",
+        "head_sha": "c" * 40,
+    }
+
+    def fake_gh_verify(args, *, stdout, check):
+        assert args[:3] == ["gh", "attestation", "verify"]
+        assert args[4:] == [
+            "--repo",
+            repository["full_name"],
+            "--cert-identity",
+            "https://github.com/ASBG-PReview/PReview/.github/workflows/pr-publish.yml@refs/heads/main",
+            "--source-ref",
+            "refs/heads/main",
+            "--source-digest",
+            "c" * 40,
+            "--deny-self-hosted-runners",
+        ]
+        assert stdout == subprocess.DEVNULL and check
+        signed_bytes = (
+            json.dumps(expected_receipt, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode()
+        if case == "unsigned receipt" or Path(args[3]).read_bytes() != signed_bytes:
+            raise subprocess.CalledProcessError(1, "gh attestation verify")
+
+    monkeypatch.setattr(publish.subprocess, "run", fake_gh_verify)
+    api = Mock(
+        side_effect=[repository, [] if case == "new head" else [row], publisher, {"id": 77}, live]
+    )
     monkeypatch.setattr(
         publish.subprocess,
         "check_output",
-        Mock(return_value=b"different" if case == "registry changed" else b"manifest"),
+        Mock(
+            return_value={
+                "registry changed": b"different",
+                "replayed proof for another digest": b"forged manifest",
+            }.get(case, b"manifest")
+        ),
     )
     monkeypatch.setattr(publish, "api", api)
     if case == "ready":
@@ -216,10 +294,35 @@ def test_resolve_requires_matching_readiness(event, monkeypatch, case):
             == f"ghcr.io/asbg-preview/preview@{DIGEST}"
         )
     else:
-        with pytest.raises(RuntimeError):
+        with pytest.raises((RuntimeError, subprocess.CalledProcessError)):
             publish.resolve("ASBG-PReview/PReview", 17, requested)
     if case == "new head":
         assert f"/commits/{requested}/" in api.call_args.args[0]
+
+
+def test_publisher_receipt_matches_the_commit_and_uses_binary_canonical_encoding(
+    event, monkeypatch, tmp_path
+):
+    payload = tmp_path / "workflow_run.json"
+    payload.write_text(json.dumps(event), encoding="utf-8")
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(payload))
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setenv("PREVIEW_DIGEST", DIGEST)
+    monkeypatch.setenv("GITHUB_RUN_ID", "42")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    publish.main("receipt")
+    raw = (tmp_path / "preview-publication.json").read_bytes()
+    assert raw.endswith(b"\n") and b"\r" not in raw
+    assert json.loads(raw) == {
+        "version": 1,
+        "repository_id": 4,
+        "pr": 17,
+        "head_sha": SHA,
+        "image": f"ghcr.io/asbg-preview/preview:pr-17-{SHA}",
+        "digest": DIGEST,
+        "run_id": 42,
+        "run_attempt": 2,
+    }
 
 
 @pytest.mark.parametrize("attack", ["old image", "skip tests", "dockerignore", "clean"])

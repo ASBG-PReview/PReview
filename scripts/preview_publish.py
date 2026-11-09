@@ -12,10 +12,13 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from scripts.stage_preview import RECIPE
 
 BUILD_PATH = ".github/workflows/pr-build.yml"
+PUBLISH_PATH = ".github/workflows/pr-publish.yml"
+RECEIPT_NAME = "preview-publication.json"
 BOT = "dependabot[bot]"
 
 
@@ -75,7 +78,7 @@ def api(path, payload=None, *, delete=False):
         command,
         input=None if payload is None else json.dumps(payload),
         stdout=subprocess.PIPE,
-        text=True,
+        encoding="utf-8",
         check=True,
     )
     return json.loads(result.stdout) if result.stdout.strip() else None
@@ -109,7 +112,7 @@ def ensure_label(root):
     # PR wins the creation race, proceed only after GitHub confirms the label exists.
     names = subprocess.check_output(
         ["gh", "api", "--paginate", f"{root}/labels?per_page=100", "--jq", ".[].name"],
-        text=True,
+        encoding="utf-8",
     ).splitlines()
     if "preview" in names:
         return
@@ -122,6 +125,72 @@ def ensure_label(root):
 
 def status_context(number):
     return f"preview/ready/pr-{number}"
+
+
+def receipt_bytes(repository, candidate, digest, run_id, attempt):
+    """Stable bytes for both the GitHub signer and a deployment-side verifier."""
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("Invalid publication digest")
+    fields = {
+        "version": 1,
+        "repository_id": repository["id"],
+        "image": image_ref(repository["full_name"], candidate),
+        "pr": candidate["number"],
+        "head_sha": candidate["head"]["sha"],
+        "digest": digest,
+        "run_id": int(run_id),
+        "run_attempt": int(attempt),
+    }
+    return (json.dumps(fields, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+
+
+def verify_publication(root, repository, candidate, digest, target_url):
+    # The status supplies a locator. GitHub's run metadata and OIDC signature
+    # authenticate the publisher and the PR-specific content of its receipt.
+    run_url = re.escape(repository["html_url"] + "/actions/runs/")
+    match = re.fullmatch(run_url + r"([1-9][0-9]*)/attempts/([1-9][0-9]*)", target_url or "")
+    if not match:
+        raise RuntimeError("Missing publisher run attempt")
+    run_id, attempt = map(int, match.groups())
+    run = api(f"{root}/actions/runs/{run_id}/attempts/{attempt}")
+    workflow = api(f"{root}/actions/workflows/pr-publish.yml")
+    if (
+        run["id"] != run_id
+        or run["run_attempt"] != attempt
+        or run["status"] != "completed"
+        or run["conclusion"] != "success"
+        or run["event"] != "workflow_run"
+        or run["workflow_id"] != workflow["id"]
+        or run["path"] != PUBLISH_PATH
+        or run["repository"]["id"] != repository["id"]
+        or (run["head_repository"] or {}).get("id") != repository["id"]
+        or run["head_branch"] != repository["default_branch"]
+        or not re.fullmatch(r"[0-9a-f]{40}", run["head_sha"])
+    ):
+        raise RuntimeError("The recorded attempt is not a successful default-branch publisher")
+    source_ref = f"refs/heads/{repository['default_branch']}"
+    with TemporaryDirectory() as directory:
+        receipt = Path(directory) / RECEIPT_NAME
+        receipt.write_bytes(receipt_bytes(repository, candidate, digest, run_id, attempt))
+        subprocess.run(
+            [
+                "gh",
+                "attestation",
+                "verify",
+                str(receipt),
+                "--repo",
+                repository["full_name"],
+                "--cert-identity",
+                f"{repository['html_url']}/{PUBLISH_PATH}@{source_ref}",
+                "--source-ref",
+                source_ref,
+                "--source-digest",
+                run["head_sha"],
+                "--deny-self-hosted-runners",
+            ],
+            stdout=subprocess.DEVNULL,
+            check=True,
+        )
 
 
 def record_and_label(root, candidate, repository, digest):
@@ -137,8 +206,8 @@ def record_and_label(root, candidate, repository, digest):
             "state": "success",
             "context": status_context(number),
             "description": digest,
-            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{repository['full_name']}"
-            f"/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+            "target_url": f"{repository['html_url']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+            f"/attempts/{os.environ['GITHUB_RUN_ATTEMPT']}",
         },
     )
     ensure_label(root)
@@ -176,6 +245,7 @@ def resolve(repository_name, number, sha):
                     or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
                 ):
                     raise RuntimeError("Invalid preview readiness record")
+                verify_publication(root, repository, candidate, digest, row.get("target_url"))
                 manifest = subprocess.check_output(
                     ["skopeo", "inspect", "--raw", f"docker://{image}"]
                 )
@@ -197,6 +267,20 @@ def main(mode):
     repository = event["repository"]
     root = f"repos/{repository['full_name']}"
     candidate = run_candidate(event)
+    if mode == "receipt":
+        if not candidate:
+            raise RuntimeError("Cannot attest an unrelated workflow run")
+        path = Path(os.environ["RUNNER_TEMP"]) / RECEIPT_NAME
+        path.write_bytes(
+            receipt_bytes(
+                repository,
+                candidate,
+                os.environ["PREVIEW_DIGEST"],
+                os.environ["GITHUB_RUN_ID"],
+                os.environ["GITHUB_RUN_ATTEMPT"],
+            )
+        )
+        return
     eligible = False
     if candidate:
         pr_path = f"{root}/pulls/{candidate['number']}"

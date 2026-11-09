@@ -9,7 +9,7 @@ defaults:
   run:
     shell: bash
 concurrency:
-  group: preview-build-${{ github.event.pull_request.number }}
+  group: preview-build-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 jobs:
   build:

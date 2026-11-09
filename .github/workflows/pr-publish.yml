@@ -69,18 +69,29 @@ jobs:
     if: needs.publish.outputs.digest != ''
     concurrency:
       group: preview-label-${{ github.event.workflow_run.pull_requests[0].number }}
-      cancel-in-progress: false
+      # A slow publication for an older head must not evict the newest waiting job.
+      queue: max
     runs-on: ubuntu-24.04
-    timeout-minutes: 3
+    timeout-minutes: 10
     permissions:
       contents: read
       pull-requests: write
       statuses: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Bind the PR head and verified digest to this publisher attempt
+        env:
+          PREVIEW_DIGEST: ${{ needs.publish.outputs.digest }}
+        run: python -m scripts.preview_publish receipt
+      - name: Sign the publication receipt with this workflow's GitHub identity
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/preview-publication.json
       - name: Record the verified digest on this commit and label its PR
         env:
           PREVIEW_DIGEST: ${{ needs.publish.outputs.digest }}

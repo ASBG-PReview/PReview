@@ -6,7 +6,7 @@ PR 기반 임시 테스트 환경 구축 프로젝트입니다. 현재는 **앱�
 
 ## 저장소 구조
 
-앱 하나와 배포 설정을 함께 관리하므로 저장소 하나를 사용합니다. AWS를 연결할 때도 같은 저장소에 필요한 설정만 추가합니다.
+FastAPI 기본 앱과 Spring PR 미리보기를 같은 저장소에서 관리합니다.
 
 ```text
 app/
@@ -15,8 +15,11 @@ app/
   tests/test_app.py   API 테스트
   Dockerfile
   requirements.txt
+preview-api/          Spring Boot PR 미리보기 (8080, /health, /environment)
 .github/
   workflows/ci.yaml   테스트 → Docker 실행 검증 → main 이미지 발행
+  workflows/pr-build.yml    PR head의 Spring 빌드·테스트·컨테이너 응답 검사
+  workflows/pr-publish.yml  이미지 발행·검증 결과 서명·preview 라벨
   dependabot.yml      의존성 업데이트
   pull_request_template.md
 scripts/smoke.py      실제 컨테이너의 응답·환경 정보 검사
@@ -68,11 +71,20 @@ python -m uvicorn app.main:app --reload
 
 ## CI와 이미지
 
-PR에서 Python 테스트와 Docker 빌드·실행을 검사하고, main 병합 후 검증한 이미지를 `ghcr.io/asbg-preview/preview:sha-<전체 SHA>`로 발행합니다. 이미지 발행 권한은 main의 별도 job에서만 사용하며 태그는 Actions 실행 요약에서 확인합니다.
+FastAPI는 PR에서 Python 테스트와 Docker 실행 검사를 거친 뒤, main에 병합되면 `ghcr.io/asbg-preview/preview:sha-<전체 SHA>`로 발행합니다.
 GHCR 패키지는 비공개일 수 있습니다. Dependabot과 Secret scanning/push protection은 활성화되어 있으며 인증정보와 `.env`는 커밋하지 않습니다.
 
-## 다음 단계
+### Spring PR 이미지를 배포하는 쪽에서
 
-AWS 연결 시 ECR/OIDC와 배포 방식을 정한 후 Helm·Argo CD 등 필요한 설정을 추가합니다. 지금은 PR 전용 URL이나 클러스터를 생성하지 않습니다.
-연결 초기에는 준비된 PR에 `preview` 라벨을 붙였을 때만 환경을 생성하고 Close/Merge 시 삭제할 계획입니다. Preview 배포 성공은 아직 병합 필수 조건이 아닙니다.
+같은 저장소의 main 대상 앱 PR에서 Actions가 Spring 이미지를 검사하고 GHCR(GitHub Container Registry)에 `pr-<번호>-<전체 head SHA>` 태그로 발행합니다. 발행한 이미지의 내용 식별자(digest)를 다시 읽고 PR·커밋·digest를 묶은 기록에 서명한 뒤 `preview` 라벨을 추가합니다.
+
+배포 프로세스는 보호된 main의 체크아웃에서 현재 PR 번호와 전체 head SHA를 사용합니다. Python 3, `gh attestation verify`를 지원하는 GitHub CLI, Skopeo가 필요합니다. GitHub에는 PR·커밋 상태·Actions 실행·서명을 읽을 수 있는 계정으로, 비공개 GHCR에는 패키지 읽기가 가능한 계정으로 인증합니다.
+
+```sh
+python -m scripts.preview_publish resolve ASBG-PReview/PReview "$PR_NUMBER" "$HEAD_SHA"
+```
+
+성공하면 `ghcr.io/asbg-preview/preview@sha256:…` 한 줄을 반환합니다. 배포자는 반환된 주소를 그대로 Pod 이미지에 사용합니다. 새 커밋의 조회가 실패하면 배포 갱신을 보류하고 다시 조회합니다. 이전 버전을 실행 중인 열린 PR은 그동안 유지하고, PR이 닫히거나 병합된 뒤 해당 PR의 환경을 정리합니다.
+
+팀 차트와 ApplicationSet에 이 판정을 연결하고, 실제 Pod 이미지와 `/environment`의 SHA를 대조하는 단계가 남아 있습니다. PR 미리보기 배포는 머지 필수 검사가 아닙니다.
 이전에 준비한 AWS/GitOps 예시는 정리 전 커밋 `7c51d61`의 Git 이력에서 확인할 수 있습니다.
