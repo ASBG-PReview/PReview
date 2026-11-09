@@ -1,11 +1,19 @@
-"""Trusted workflow_run policy. PR artifacts supply image bytes only."""
+"""Trusted workflow_run policy. PR artifacts supply image bytes only.
 
+From a trusted checkout with gh and skopeo read access, deploy the output of
+    python -m scripts.preview_publish resolve OWNER/REPO PR_NUMBER FULL_HEAD_SHA
+Only a successful exit provides a deployable image reference.
+"""
+
+import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+from scripts.stage_preview import RECIPE
 
 BUILD_PATH = ".github/workflows/pr-build.yml"
 BOT = "dependabot[bot]"
@@ -57,10 +65,12 @@ def image_ref(repository, candidate):
     return f"ghcr.io/{repository.lower()}:pr-{candidate['number']}-{candidate['head']['sha']}"
 
 
-def api(path, payload=None):
+def api(path, payload=None, *, delete=False):
     command = ["gh", "api", path]
     if payload is not None:
         command.extend(["--method", "POST", "--input", "-"])
+    if delete:
+        command.extend(["--method", "DELETE"])
     result = subprocess.run(
         command,
         input=None if payload is None else json.dumps(payload),
@@ -68,17 +78,30 @@ def api(path, payload=None):
         text=True,
         check=True,
     )
-    return json.loads(result.stdout)
+    return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 def trusted_builder(root, candidate):
-    # pull_request workflows execute from a merge ref. Check both parents' builder
-    # blobs against the publisher checkout; a PR cannot substitute a different recipe.
-    trusted = subprocess.check_output(["git", "rev-parse", f"HEAD:{BUILD_PATH}"], text=True).strip()
-    return all(
-        api(f"{root}/contents/{BUILD_PATH}?ref={candidate[side]['sha']}")["sha"] == trusted
-        for side in ("head", "base")
-    )
+    paths = {BUILD_PATH, "scripts/stage_preview.py", *(f"preview-api/{p}" for p in RECIPE)}
+    rows = subprocess.check_output(
+        ["git", "ls-tree", "-r", "HEAD", "--", *sorted(paths)], text=True
+    ).splitlines()
+    trusted = {}
+    for row in rows:
+        metadata, path = row.split("\t", 1)
+        mode, kind, sha = metadata.split()
+        if kind == "blob" and mode in {"100644", "100755"}:
+            trusted[path] = (mode, sha)
+    if trusted.keys() != paths:
+        raise RuntimeError("Publisher checkout is missing a trusted build input")
+    for side in ("head", "base"):
+        snapshot = api(f"{root}/git/trees/{candidate[side]['sha']}?recursive=1")
+        if snapshot["truncated"]:
+            raise RuntimeError("Cannot verify a truncated Git tree")
+        found = {e["path"]: (e["mode"], e["sha"]) for e in snapshot["tree"] if e["path"] in paths}
+        if found != trusted:
+            return False
+    return True
 
 
 def ensure_label(root):
@@ -95,6 +118,78 @@ def ensure_label(root):
     except subprocess.CalledProcessError:
         if api(f"{root}/labels/preview")["name"] != "preview":
             raise
+
+
+def status_context(number):
+    return f"preview/ready/pr-{number}"
+
+
+def record_and_label(root, candidate, repository, digest):
+    if not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        raise ValueError("Invalid publication digest")
+    number, sha = candidate["number"], candidate["head"]["sha"]
+    pr_path = f"{root}/pulls/{number}"
+    label_path = f"{root}/issues/{number}/labels"
+    # A commit status remains bound to the verified SHA even if the PR moves during POST.
+    api(
+        f"{root}/statuses/{sha}",
+        {
+            "state": "success",
+            "context": status_context(number),
+            "description": digest,
+            "target_url": f"{os.environ['GITHUB_SERVER_URL']}/{repository['full_name']}"
+            f"/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+        },
+    )
+    ensure_label(root)
+    before = api(pr_path)
+    if not current_pr(before, candidate, repository):
+        return
+    if any(label["name"] == "preview" for label in before["labels"]):
+        return
+    labels = api(label_path, {"labels": ["preview"]})
+    if not any(label["name"] == "preview" for label in labels):
+        raise RuntimeError("GitHub did not return the requested preview label")
+    if not current_pr(api(pr_path), candidate, repository):
+        api(f"{label_path}/preview", delete=True)
+
+
+def resolve(repository_name, number, sha):
+    """Print a digest-pinned deployment input only for this exact open, labeled PR head."""
+    if number < 1 or not re.fullmatch(r"[0-9a-f]{40}", sha):
+        raise ValueError("Expected a PR number and a full commit SHA")
+    root = f"repos/{repository_name}"
+    repository = api(root)
+    candidate = {"number": number, "head": {"sha": sha}}
+    image = image_ref(repository["full_name"], candidate)
+    # GitHub returns the newest status for each context first on the statuses endpoint.
+    # A missing status (including a new head that has never published) fails closed.
+    page = 1
+    while True:
+        rows = api(f"{root}/commits/{sha}/statuses?per_page=100&page={page}")
+        for row in rows:
+            if row["context"] == status_context(number):
+                digest = row["description"] or ""
+                if (
+                    row["state"] != "success"
+                    or row["creator"]["login"] != "github-actions[bot]"
+                    or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest)
+                ):
+                    raise RuntimeError("Invalid preview readiness record")
+                manifest = subprocess.check_output(
+                    ["skopeo", "inspect", "--raw", f"docker://{image}"]
+                )
+                if "sha256:" + hashlib.sha256(manifest).hexdigest() != digest:
+                    raise RuntimeError("Published tag differs from the commit readiness record")
+                live = api(f"{root}/pulls/{number}")
+                if not current_pr(live, candidate, repository) or not any(
+                    label["name"] == "preview" for label in live["labels"]
+                ):
+                    raise RuntimeError("The requested commit is not the current labeled PR head")
+                return f"ghcr.io/{repository['full_name'].lower()}@{digest}"
+        if len(rows) < 100:
+            raise RuntimeError("No verified publication for the requested PR and SHA")
+        page += 1
 
 
 def main(mode):
@@ -119,17 +214,15 @@ def main(mode):
             print("Skipped: run, PR head or build definition is no longer eligible.")
     elif mode == "label":
         if eligible:
-            ensure_label(root)
-            if current_pr(api(pr_path), candidate, repository):
-                labels = api(f"{root}/issues/{candidate['number']}/labels", {"labels": ["preview"]})
-                if not any(label["name"] == "preview" for label in labels):
-                    raise RuntimeError("GitHub did not return the requested preview label")
-                print(f"PR #{candidate['number']} has the preview label.")
-                return
-        print("Skipped label: PR is no longer eligible.")
+            record_and_label(root, candidate, repository, os.environ["PREVIEW_DIGEST"])
+        else:
+            print("Skipped label: PR is no longer eligible.")
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
 
 if __name__ == "__main__":
-    main(sys.argv[1])
+    if sys.argv[1] == "resolve":
+        print(resolve(sys.argv[2], int(sys.argv[3]), sys.argv[4]))
+    else:
+        main(sys.argv[1])

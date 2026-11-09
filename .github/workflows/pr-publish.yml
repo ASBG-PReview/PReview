@@ -16,13 +16,16 @@ jobs:
       github.event.workflow_run.head_repository.id == github.event.repository.id
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: preview-publish-${{ github.event.workflow_run.pull_requests[0].number }}-${{ github.event.workflow_run.head_sha }}
+      cancel-in-progress: false
     permissions:
       actions: read
       contents: read
       pull-requests: read
       packages: write
     outputs:
-      pushed: ${{ steps.push.outputs.pushed }}
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -32,7 +35,7 @@ jobs:
         id: gate
         env:
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/preview_publish.py check
+        run: python -m scripts.preview_publish check
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: steps.gate.outputs.eligible == 'true'
         with:
@@ -52,34 +55,34 @@ jobs:
           skopeo inspect --config "$source_image" | jq -e \
             '.config.Labels["org.opencontainers.image.revision"] == env.EXPECTED_SHA and
              .config.Labels["org.opencontainers.image.source"] == (env.GITHUB_SERVER_URL + "/" + env.GITHUB_REPOSITORY)'
-          eligible=$(python scripts/preview_publish.py current)
+          eligible=$(python -m scripts.preview_publish current)
           if [[ "$eligible" != true ]]; then exit 0; fi
           authfile="$RUNNER_TEMP/preview-ghcr-auth.json"
           trap 'rm -f "$authfile"' EXIT
           printf '%s' "$GH_TOKEN" | skopeo login --authfile "$authfile" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
-          skopeo copy --authfile "$authfile" --digestfile "$RUNNER_TEMP/preview-digest" \
-            "$source_image" "docker://$IMAGE"
-          digest=$(cat "$RUNNER_TEMP/preview-digest")
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          actual=$(skopeo inspect --authfile "$authfile" --no-tags --format '{{.Digest}}' "docker://$IMAGE")
-          test "$actual" = "$digest"
+          digest=$(REGISTRY_AUTH_FILE="$authfile" bash scripts/publish_preview_image.sh "$source_image" "$IMAGE")
           printf 'Verified `%s` · `%s`\n' "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
           printf 'Verified %s@%s\n' "$IMAGE" "$digest"
-          echo 'pushed=true' >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
   label:
     needs: publish
-    if: needs.publish.outputs.pushed == 'true'
+    if: needs.publish.outputs.digest != ''
+    concurrency:
+      group: preview-label-${{ github.event.workflow_run.pull_requests[0].number }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 3
     permissions:
       contents: read
       pull-requests: write
+      statuses: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Add preview label to the current PR
+      - name: Record the verified digest on this commit and label its PR
         env:
+          PREVIEW_DIGEST: ${{ needs.publish.outputs.digest }}
           GH_TOKEN: ${{ github.token }}
-        run: python scripts/preview_publish.py label
+        run: python -m scripts.preview_publish label

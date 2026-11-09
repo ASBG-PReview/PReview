@@ -27,13 +27,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
           persist-credentials: false
       - name: Build Spring Boot image
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
+          git show HEAD:scripts/stage_preview.py > "$RUNNER_TEMP/stage_preview.py"
+          python -I "$RUNNER_TEMP/stage_preview.py" "$BASE_SHA" "$RUNNER_TEMP/preview-context"
           docker build --label "org.opencontainers.image.revision=$COMMIT_SHA" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
-            -t preview-build:tested ./preview-api
+            -t preview-build:tested "$RUNNER_TEMP/preview-context"
       - name: Verify health and PR identity on port 8080
         run: |
           docker run -d --name preview-smoke --cap-drop ALL --security-opt no-new-privileges \
