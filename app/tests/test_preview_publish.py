@@ -77,6 +77,30 @@ def live_pr(candidate):
     return {**candidate, "state": "open", "user": {"login": "team-member"}}
 
 
+@pytest.mark.parametrize("trusted", [True, False])
+def test_gate_emits_publication_target_only_for_a_trusted_build(
+    event, monkeypatch, tmp_path, trusted
+):
+    payload = tmp_path / "event.json"
+    payload.write_text(json.dumps(event), encoding="utf-8")
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(payload))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    candidate = publish.run_candidate(event)
+    monkeypatch.setattr(publish, "api", Mock(return_value=live_pr(candidate)))
+    monkeypatch.setattr(publish, "trusted_builder", Mock(return_value=trusted))
+    publish.main("check")
+    result = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    expected = {"eligible": "false"}
+    if trusted:
+        expected = {
+            "eligible": "true",
+            "sha": SHA,
+            "image": f"ghcr.io/asbg-preview/preview:pr-17-{SHA}",
+        }
+    assert result == expected
+
+
 @pytest.mark.parametrize(
     "change",
     [

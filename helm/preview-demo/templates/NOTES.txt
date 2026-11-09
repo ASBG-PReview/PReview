@@ -1,3 +1,0 @@
-Namespace: {{ include "preview-demo.namespace" . }}
-kubectl -n {{ include "preview-demo.namespace" . }} rollout status deployment/{{ include "preview-demo.fullname" . }}
-Health endpoint: /health (container port {{ .Values.containerPort }})

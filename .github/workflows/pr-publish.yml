@@ -59,7 +59,12 @@ jobs:
           printf '%s' "$GH_TOKEN" | skopeo login --authfile "$authfile" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
           skopeo copy --authfile "$authfile" --digestfile "$RUNNER_TEMP/preview-digest" \
             "$source_image" "docker://$IMAGE"
-          printf 'Published `%s` · `%s`\n' "$IMAGE" "$(cat "$RUNNER_TEMP/preview-digest")" >> "$GITHUB_STEP_SUMMARY"
+          digest=$(cat "$RUNNER_TEMP/preview-digest")
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          actual=$(skopeo inspect --authfile "$authfile" --no-tags --format '{{.Digest}}' "docker://$IMAGE")
+          test "$actual" = "$digest"
+          printf 'Verified `%s` · `%s`\n' "$IMAGE" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          printf 'Verified %s@%s\n' "$IMAGE" "$digest"
           echo 'pushed=true' >> "$GITHUB_OUTPUT"
   label:
     needs: publish

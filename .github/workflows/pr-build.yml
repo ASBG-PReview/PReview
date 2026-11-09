@@ -38,10 +38,15 @@ jobs:
         run: |
           docker run -d --name preview-smoke --cap-drop ALL --security-opt no-new-privileges \
             -p 127.0.0.1:18080:8080 -e PR_NUMBER -e COMMIT_SHA -e NAMESPACE preview-build:tested
-          curl -fsS --retry 30 --retry-all-errors --retry-delay 2 --max-time 5 \
-            http://127.0.0.1:18080/health | jq -e '.status == "ok"'
-          curl -fsS --max-time 5 http://127.0.0.1:18080/environment | \
-            jq -e '.prNumber == env.PR_NUMBER and .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE'
+          health=$(curl -fsS --retry 30 --retry-all-errors --retry-delay 2 --max-time 5 \
+            -o "$RUNNER_TEMP/health.json" -w '%{http_code}' http://127.0.0.1:18080/health)
+          test "$health" = 200
+          jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
+          identity=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/environment.json" \
+            -w '%{http_code}' http://127.0.0.1:18080/environment)
+          test "$identity" = 200
+          jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
+            .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/environment.json"
       - name: Remove smoke container
         if: always()
         run: docker rm -f preview-smoke || true

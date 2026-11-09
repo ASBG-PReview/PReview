@@ -1,9 +1,0 @@
-# Local-only overrides. Pass PR number and commit SHA separately.
-image:
-  repository: preview-api
-  tag: local
-  pullPolicy: IfNotPresent
-service:
-  port: 8080
-ingress:
-  enabled: false
