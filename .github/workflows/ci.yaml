@@ -13,49 +13,78 @@ concurrency:
   cancel-in-progress: true
 jobs:
   tests:
-    name: Python tests
+    name: Preview publication policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
-        with:
-          python-version: '3.12'
-      - run: pip install -r requirements-dev.txt
-      - run: ruff check . && ruff format --check .
-      - run: pytest -q
+      - run: node --test tests/preview-publish.test.mjs
   docker:
-    name: Docker smoke test
+    name: Spring image and registry test
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build container
-        run: docker build -f app/Dockerfile -t preview-ci:build .
-      - name: Verify container and environment identity
+      - name: Build and wait for the Spring service using Compose
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number || 'local' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || 'main' }}
           COMMIT_SHA: ${{ github.sha }}
+          NAMESPACE: ci-smoke
         run: |
-          docker run -d --name preview-smoke --read-only --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8000:8000 -e PR_NUMBER -e COMMIT_SHA -e POD_NAMESPACE=preview-smoke preview-ci:build
-          python scripts/smoke.py
+          docker compose up --build --wait --wait-timeout 100 --detach
+          base=http://127.0.0.1:8080
+          health=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/health.json" -w '%{http_code}' "$base/health")
+          test "$health" = 200
+          jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
+          status=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/env.json" -w '%{http_code}' "$base/environment")
+          test "$status" = 200
+          jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
+            .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/env.json"
+          container=$(docker compose ps -q preview-api)
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$container")" = healthy
+          test "$(docker exec "$container" id -u)" -gt 0
+          test "$(docker exec "$container" id -g)" -gt 0
+          docker tag "$(docker inspect -f '{{.Image}}' "$container")" preview-ci:build
+          docker cp "$container:/app/app.jar" "$RUNNER_TEMP/runtime.jar"
+      - name: Check the embedded Tomcat security floor in the runtime JAR
+        run: |
+          jar tf "$RUNNER_TEMP/runtime.jar" > "$RUNNER_TEMP/jar-entries"
+          for module in core el websocket; do
+            version=$(sed -nE "s|^BOOT-INF/lib/tomcat-embed-${module}-([0-9.]+)\.jar$|\1|p" "$RUNNER_TEMP/jar-entries")
+            [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+            dpkg --compare-versions "$version" ge 10.1.61
+          done
+      - name: Confirm empty, fully skipped, and failing JUnit suites block verification
+        run: |
+          docker build --target tested -t preview-ci:junit ./preview-api
+          docker run --rm -i --network none preview-ci:junit bash -s < tests/preview-junit-gate.sh
+      - name: Test publication and retry against a local registry
+        run: |
+          docker save preview-ci:build -o "$RUNNER_TEMP/preview-image.tar"
+          docker run -d --name preview-registry -p 127.0.0.1:5000:5000 registry:3
+          curl -fsS --retry 15 --retry-all-errors --retry-delay 1 http://127.0.0.1:5000/v2/
+          mkdir -p "$HOME/.config/containers"
+          printf '[[registry]]\nlocation = "127.0.0.1:5000"\ninsecure = true\n' > "$HOME/.config/containers/registries.conf"
+          # A changed build label guarantees a distinct manifest even on reproducible builders.
+          docker build --label test.rebuild=second -t preview-ci:second ./preview-api
+          docker save preview-ci:second -o "$RUNNER_TEMP/second.tar"
+          bash tests/registry-retry.sh "docker-archive:$RUNNER_TEMP/preview-image.tar" \
+            "docker-archive:$RUNNER_TEMP/second.tar" 127.0.0.1:5000/preview:ci
       - name: Container logs and cleanup
         if: always()
         run: |
-          docker logs preview-smoke || true
-          docker rm -f preview-smoke || true
-      - name: Export tested main image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker save preview-ci:build -o /tmp/preview-image.tar
+          docker compose logs preview-api || true
+          docker compose down
+          docker rm -f preview-registry || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: preview-image
-          path: /tmp/preview-image.tar
+          path: ${{ runner.temp }}/preview-image.tar
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
@@ -70,7 +99,7 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          python -c 'import json,os; assert all(j["result"] == "success" for j in json.loads(os.environ["RESULTS"]).values()), os.environ["RESULTS"]'
+          jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
   publish:
     name: Publish main image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

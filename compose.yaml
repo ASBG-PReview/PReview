@@ -1,15 +1,12 @@
 services:
-  demo:
-    build:
-      context: .
-      dockerfile: app/Dockerfile
+  preview-api:
+    build: ./preview-api
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8080:8080"
     environment:
       PR_NUMBER: "${PR_NUMBER:-local}"
       COMMIT_SHA: "${COMMIT_SHA:-local}"
-      POD_NAMESPACE: "${POD_NAMESPACE:-local}"
-      PREVIEW_COLOR: "${PREVIEW_COLOR:-blue}"
+      NAMESPACE: "${NAMESPACE:-local}"
     read_only: true
     tmpfs:
       - /tmp

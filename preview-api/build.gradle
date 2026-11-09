@@ -1,8 +1,10 @@
 plugins {
     id 'java'
-    id 'org.springframework.boot' version '3.3.5'
+    id 'org.springframework.boot' version '3.5.16'
     id 'io.spring.dependency-management' version '1.1.6'
 }
+
+ext['tomcat.version'] = '10.1.61'
 
 group = 'com.preview'
 version = '0.0.1'
@@ -25,4 +27,27 @@ dependencies {
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+def junitResults = tasks.named('test', Test).flatMap { it.reports.junitXml.outputLocation }
+
+tasks.register('verifyPreviewTests') {
+    dependsOn tasks.named('test')
+    doLast {
+        long passed = 0
+        fileTree(junitResults).matching { include 'TEST-*.xml' }.each { report ->
+            def suite = new groovy.xml.XmlSlurper().parse(report)
+            passed += suite.testcase.count { test ->
+                test.skipped.isEmpty() && test.failure.isEmpty() && test.error.isEmpty()
+            }
+        }
+        if (passed == 0) {
+            throw new GradleException('No passing JUnit test was executed')
+        }
+        logger.lifecycle("Passing JUnit tests: ${passed}")
+    }
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('verifyPreviewTests')
 }
