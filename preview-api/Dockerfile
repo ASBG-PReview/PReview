@@ -1,14 +1,21 @@
+FROM gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7 AS distribution
+
 FROM eclipse-temurin:21-jdk AS packaged
+COPY --from=distribution /opt/gradle /opt/gradle
+ENV PATH="/opt/gradle/bin:${PATH}"
 WORKDIR /app
-COPY gradlew build.gradle settings.gradle ./
+COPY build.gradle settings.gradle ./
 COPY gradle ./gradle
 COPY src/main ./src/main
-RUN chmod +x gradlew && ./gradlew clean bootJar --no-daemon && cp build/libs/*.jar app.jar
+# Keep container builds on the same Gradle version as the local wrapper.
+RUN version=$(gradle --version | awk '$1 == "Gradle" {print $2}') && \
+    grep -Fqx "distributionUrl=https\\://services.gradle.org/distributions/gradle-${version}-bin.zip" gradle/wrapper/gradle-wrapper.properties && \
+    gradle clean bootJar --no-daemon && cp build/libs/*.jar app.jar
 
 # Tests can write to their own copy of the build directory, including its JAR.
 FROM packaged AS tested
 COPY src/test ./src/test
-RUN ./gradlew test --no-daemon && touch /tests-passed
+RUN gradle test --no-daemon && touch /tests-passed
 
 # Require the test stage to succeed while keeping its writable filesystem out of the runtime.
 FROM packaged AS verified
