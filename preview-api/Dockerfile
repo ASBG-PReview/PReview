@@ -1,6 +1,6 @@
 FROM gradle:8.14.3-jdk21@sha256:21bd311ed01360c189b8870c6b6e988199ff10f72d445d02fb39d3cff9da91d7 AS distribution
 
-FROM eclipse-temurin:21-jdk AS packaged
+FROM eclipse-temurin:25-jdk AS packaged
 COPY --from=distribution /opt/gradle /opt/gradle
 ENV PATH="/opt/gradle/bin:${PATH}"
 WORKDIR /app
@@ -21,7 +21,7 @@ RUN gradle verifyPreviewTests --no-daemon && touch /tests-passed
 FROM packaged AS verified
 COPY --from=tested /tests-passed /checks/tests-passed
 
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:25-jre
 WORKDIR /app
 COPY --from=verified /app/app.jar /app/app.jar
 USER 10001:10001
