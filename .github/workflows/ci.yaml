@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   tests:
-    name: Python tests
+    name: Preview publication policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -27,35 +27,55 @@ jobs:
       - run: ruff check . && ruff format --check .
       - run: pytest -q
   docker:
-    name: Docker smoke test
+    name: Spring image and registry test
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build container
-        run: docker build -f app/Dockerfile -t preview-ci:build .
-      - name: Verify container and environment identity
+      - name: Build Spring JAR and run JUnit in Docker
+        run: docker build -t preview-ci:build ./preview-api
+      - name: Verify Spring health and environment identity
         env:
-          PR_NUMBER: ${{ github.event.pull_request.number || 'local' }}
+          PR_NUMBER: ${{ github.event.pull_request.number || 'main' }}
           COMMIT_SHA: ${{ github.sha }}
+          NAMESPACE: ci-smoke
         run: |
-          docker run -d --name preview-smoke --read-only --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:8000:8000 -e PR_NUMBER -e COMMIT_SHA -e POD_NAMESPACE=preview-smoke preview-ci:build
-          python scripts/smoke.py
+          docker run -d --name preview-smoke --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:18080:8080 -e PR_NUMBER -e COMMIT_SHA -e NAMESPACE preview-ci:build
+          base=http://127.0.0.1:18080
+          health=$(curl -fsS --retry 30 --retry-all-errors --retry-delay 2 --max-time 5 \
+            -o "$RUNNER_TEMP/health.json" -w '%{http_code}' "$base/health")
+          test "$health" = 200
+          jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
+          status=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/env.json" -w '%{http_code}' "$base/environment")
+          test "$status" = 200
+          jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
+            .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/env.json"
+      - name: Test publication and retry against a local registry
+        run: |
+          docker save preview-ci:build -o "$RUNNER_TEMP/preview-image.tar"
+          docker run -d --name preview-registry -p 127.0.0.1:5000:5000 registry:3
+          curl -fsS --retry 15 --retry-all-errors --retry-delay 1 http://127.0.0.1:5000/v2/
+          mkdir -p "$HOME/.config/containers"
+          printf '[[registry]]\nlocation = "127.0.0.1:5000"\ninsecure = true\n' > "$HOME/.config/containers/registries.conf"
+          source_image="docker-archive:$RUNNER_TEMP/preview-image.tar"
+          target="127.0.0.1:5000/preview:ci"
+          digest=$(bash scripts/publish_preview_image.sh "$source_image" "$target")
+          test "$(bash scripts/publish_preview_image.sh "$source_image" "$target")" = "$digest"
+          skopeo inspect --raw "docker://$target" > "$RUNNER_TEMP/remote-manifest.json"
+          test "$(skopeo manifest-digest "$RUNNER_TEMP/remote-manifest.json")" = "$digest"
       - name: Container logs and cleanup
         if: always()
         run: |
           docker logs preview-smoke || true
-          docker rm -f preview-smoke || true
-      - name: Export tested main image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        run: docker save preview-ci:build -o /tmp/preview-image.tar
+          docker rm -f preview-smoke preview-registry || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: preview-image
-          path: /tmp/preview-image.tar
+          path: ${{ runner.temp }}/preview-image.tar
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
@@ -70,7 +90,7 @@ jobs:
         env:
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          python -c 'import json,os; assert all(j["result"] == "success" for j in json.loads(os.environ["RESULTS"]).values()), os.environ["RESULTS"]'
+          jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
   publish:
     name: Publish main image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

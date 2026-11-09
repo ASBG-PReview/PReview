@@ -4,48 +4,30 @@ PR 기반 임시 테스트 환경 구축 프로젝트입니다. 현재는 **앱�
 
 [![CI](https://github.com/ASBG-PReview/PReview/actions/workflows/ci.yaml/badge.svg)](https://github.com/ASBG-PReview/PReview/actions/workflows/ci.yaml)
 
-## 저장소 구조
+## 앱을 실행하는 방법
 
-FastAPI 기본 앱과 Spring PR 미리보기를 같은 저장소에서 관리합니다.
-
-```text
-app/
-  main.py             FastAPI: /health, /version, /pr-info
-  static/index.html   PR 번호와 Commit SHA를 보여주는 화면
-  tests/test_app.py   API 테스트
-  Dockerfile
-  requirements.txt
-preview-api/          Spring Boot PR 미리보기 (8080, /health, /environment)
-.github/
-  workflows/ci.yaml   테스트 → Docker 실행 검증 → main 이미지 발행
-  workflows/pr-build.yml    PR head의 Spring 빌드·테스트·컨테이너 응답 검사
-  workflows/pr-publish.yml  이미지 발행·검증 결과 서명·preview 라벨
-  dependabot.yml      의존성 업데이트
-  pull_request_template.md
-scripts/smoke.py      실제 컨테이너의 응답·환경 정보 검사
-compose.yaml         로컬 실행
-requirements-dev.txt
-pyproject.toml       테스트·코드 스타일 설정
-```
-
-## 실행
-
-Docker Engine을 시작한 뒤:
+배포하는 앱은 `preview-api/`의 Java 21 Spring Boot 서비스입니다. Docker 빌드 중 Gradle의 `bootJar`가 실행 가능한 JAR를 만들고 JUnit 테스트를 실행합니다. 최종 이미지에는 Java 런타임과 앱 JAR가 들어갑니다.
 
 ```sh
 docker compose up --build -d
+curl http://localhost:8080/health
+curl http://localhost:8080/environment
+docker compose down
 ```
 
-화면: http://localhost:8000 · 종료: `docker compose down`
+`/health`의 `status`는 `ok`입니다. `/environment`는 `PR_NUMBER`, `COMMIT_SHA`, `NAMESPACE`를 각각 `prNumber`, `commitSha`, `namespace`로 보여줍니다. Compose의 기본값은 모두 `local`입니다.
 
-`PR_NUMBER`, `COMMIT_SHA`, `POD_NAMESPACE`, `PREVIEW_COLOR=blue|red` 환경변수로 화면 정보를 변경할 수 있습니다.
+## 저장소에서 Python을 쓰는 곳
 
-Python만 사용할 때는 가상환경에서:
+GitHub Actions는 빌드와 발행 단계를 순서대로 실행합니다. JAR 생성은 Gradle이 담당합니다. Python은 CI에서 빌드에 포함할 파일을 고르고(`scripts/stage_preview.py`), 발행·배포 전에 PR 번호, 최신 커밋과 이미지 검증 기록이 일치하는지 확인합니다(`scripts/preview_publish.py`). Spring 앱을 빌드하거나 실행하기 위해 Python을 설치할 필요는 없습니다.
+
+이 자동화의 검증 규칙을 수정할 때는 Python 3.12 가상환경에서 다음 검사를 실행합니다.
 
 ```sh
 python -m pip install -r requirements-dev.txt
 python -m pytest -q
-python -m uvicorn app.main:app --reload
+ruff check .
+ruff format --check .
 ```
 
 ## PR 정책
@@ -71,7 +53,7 @@ python -m uvicorn app.main:app --reload
 
 ## CI와 이미지
 
-FastAPI는 PR에서 Python 테스트와 Docker 실행 검사를 거친 뒤, main에 병합되면 `ghcr.io/asbg-preview/preview:sha-<전체 SHA>`로 발행합니다.
+GHCR(GitHub Container Registry)은 Docker 이미지를 저장하는 GitHub 서비스입니다. 필수 CI는 Spring 이미지를 빌드해 실제 HTTP 응답을 검사하고, 임시 레지스트리에서 같은 이미지의 첫 발행·재시도·digest 재조회를 검증합니다. PR에서는 main과 합쳐질 코드를 검사합니다. main에 병합되면 같은 검사를 통과한 이미지 파일을 다시 빌드하지 않고 `ghcr.io/asbg-preview/preview:sha-<전체 main SHA>`로 발행합니다.
 GHCR 패키지는 비공개일 수 있습니다. Dependabot과 Secret scanning/push protection은 활성화되어 있으며 인증정보와 `.env`는 커밋하지 않습니다.
 
 ### Spring PR 이미지를 배포하는 쪽에서
