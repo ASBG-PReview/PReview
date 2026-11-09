@@ -325,7 +325,7 @@ def test_publisher_receipt_matches_the_commit_and_uses_binary_canonical_encoding
     }
 
 
-@pytest.mark.parametrize("attack", ["old image", "skip tests", "dockerignore", "clean"])
+@pytest.mark.parametrize("attack", ["old image", "skip tests", "dockerignore", "compose", "clean"])
 def test_stage_only_tested_commit_inputs(tmp_path, monkeypatch, attack):
     monkeypatch.chdir(tmp_path)
     app = tmp_path / "preview-api"
@@ -361,12 +361,15 @@ def test_stage_only_tested_commit_inputs(tmp_path, monkeypatch, attack):
         (app / "Dockerfile").write_text("FROM old-app", encoding="utf-8")
     elif attack == "skip tests":
         (app / "build.gradle").write_text("test.enabled = false", encoding="utf-8")
+    elif attack == "compose":
+        (app / "compose.yaml").write_text("services: {dev: {image: old-app}}", encoding="utf-8")
     elif attack == "dockerignore":
         (app / ".dockerignore").write_text("src/test", encoding="utf-8")
     commit()
     destination = tmp_path / "context"
-    if attack == "clean":
+    if attack in {"compose", "clean"}:
         stage(base, destination)
+        assert not (destination / "compose.yaml").exists()
         assert (destination / java_test).read_text() == "throw new AssertionError();"
     else:
         with pytest.raises(ValueError):

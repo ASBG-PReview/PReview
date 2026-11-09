@@ -29,7 +29,7 @@ def stage(base, destination):
     head_files, base_files = tree("HEAD"), tree(base)
     destination.mkdir()
     for name in sorted(RECIPE | head_files.keys()):
-        if name in {".gitignore", "gradlew.bat", "README.md"}:
+        if name in {".gitignore", "gradlew.bat", "README.md", "compose.yaml"}:
             continue
         if name not in RECIPE and not name.startswith("src/"):
             raise ValueError(f"Unreviewed build input: {name}")
