@@ -34,8 +34,8 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$COMMIT_SHA"
-          git show HEAD:scripts/stage_preview.py > "$RUNNER_TEMP/stage_preview.py"
-          python -I "$RUNNER_TEMP/stage_preview.py" "$BASE_SHA" "$RUNNER_TEMP/preview-context"
+          git show HEAD:scripts/stage-preview.mjs > "$RUNNER_TEMP/stage-preview.mjs"
+          node "$RUNNER_TEMP/stage-preview.mjs" "$BASE_SHA" "$RUNNER_TEMP/preview-context"
           docker build --label "org.opencontainers.image.revision=$COMMIT_SHA" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             -t preview-build:tested "$RUNNER_TEMP/preview-context"
