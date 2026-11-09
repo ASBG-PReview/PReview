@@ -33,7 +33,7 @@ docker compose down
 node scripts/preview-publish.mjs resolve ASBG-PReview/PReview "$PR_NUMBER" "$HEAD_SHA"
 ```
 
-성공 시 출력된 `ghcr.io/asbg-preview/preview@sha256:…`를 Pod 이미지로 사용합니다. 라벨은 배포 후보를 표시합니다. 새 SHA의 검증이 끝날 때까지 기존 환경을 유지하고 PR이 닫히면 해당 환경을 삭제합니다. 팀 차트와 ApplicationSet의 digest 연동은 별도 작업입니다.
+성공 시 출력된 `ghcr.io/asbg-preview/preview@sha256:…`를 Pod 이미지로 사용합니다. 같은 SHA의 재발행이 끝나기 전이거나 실패했을 때도 이전 성공 기록의 서명과 현재 레지스트리 digest가 일치하면 그 이미지를 반환합니다. 기존 `preview` 라벨은 새 커밋에도 남을 수 있으므로 배포자는 최신 SHA로 `resolve`를 실행합니다. 팀 배포 컨트롤러는 조회 성공 시 차트에 digest를 전달하고, 검증 대기 중 기존 환경 유지와 PR 종료 시 삭제를 담당합니다.
 
 ## 팀 PR 규칙
 

@@ -118,7 +118,7 @@ export class Publisher {
     if (!currentPR(this.api(path), pr, repo)) this.api(labels + '/preview', { method: 'DELETE' });
   }
 
-  verifyPublication(repo, pr, digest, target) {
+  hasSuccessfulPublication(repo, pr, digest, target) {
     const prefix = repo.html_url + '/actions/runs/';
     const match = typeof target === 'string' && target.startsWith(prefix) &&
       /^([1-9]\d*)\/attempts\/([1-9]\d*)$/.exec(target.slice(prefix.length));
@@ -128,13 +128,14 @@ export class Publisher {
     const bytes = receipt(repo, pr, digest, runId, attempt);
     const run = this.api('/actions/runs/' + runId + '/attempts/' + attempt);
     const workflow = this.api('/actions/workflows/pr-publish.yml');
-    if (run.id !== runId || run.run_attempt !== attempt || run.status !== 'completed' ||
-        run.conclusion !== 'success' || run.event !== 'workflow_run' || run.workflow_id !== workflow.id ||
+    if (run.id !== runId || run.run_attempt !== attempt || run.event !== 'workflow_run' || run.workflow_id !== workflow.id ||
         run.path !== publishPath || run.repository.id !== repo.id || run.head_repository?.id !== repo.id ||
         run.head_branch !== repo.default_branch || !fullSha.test(run.head_sha)) {
       throw new Error('Not a successful default-branch publisher attempt');
     }
+    if (run.status !== 'completed' || run.conclusion !== 'success') return false;
     this.verifySignature(repo, receiptName, bytes, run.head_sha);
+    return true;
   }
 
   verifySignature(repo, name, bytes, sourceSha) {
@@ -153,21 +154,27 @@ export class Publisher {
     }
   }
 
+  *readinessRecords(number, sha) {
+    for (let page = 1; ; page++) {
+      const rows = this.api('/commits/' + sha + '/statuses?per_page=100&page=' + page);
+      yield* rows.filter(row => row.context === statusContext(number));
+      if (rows.length < 100) return;
+    }
+  }
+
   resolve(number, sha) {
     if (!positiveId(number) || !fullSha.test(sha)) throw new Error('Expected PR number and full SHA');
     const repo = this.api('');
     const pr = { number, head: { sha } };
-    for (let page = 1; ; page++) {
-      const rows = this.api('/commits/' + sha + '/statuses?per_page=100&page=' + page);
-      const status = rows.find(row => row.context === statusContext(number));
-      if (!status) {
-        if (rows.length < 100) throw new Error('No verified publication for this PR and SHA');
-        continue;
-      }
+    let expectedDigest;
+    for (const status of this.readinessRecords(number, sha)) {
       const digest = status.description;
       if (status.state !== 'success' || status.creator.login !== 'github-actions[bot]' ||
           !digestPattern.test(digest)) throw new Error('Invalid preview readiness record');
-      this.verifyPublication(repo, pr, digest, status.target_url);
+      if (expectedDigest && digest !== expectedDigest) throw new Error('Conflicting publication digest');
+      expectedDigest = digest;
+      // Only the outcome of a trusted publisher attempt can defer to an earlier record.
+      if (!this.hasSuccessfulPublication(repo, pr, digest, status.target_url)) continue;
       const manifest = this.command('skopeo', ['inspect', '--raw', 'docker://' + imageTag(repo, pr)]);
       if ('sha256:' + createHash('sha256').update(manifest).digest('hex') !== digest) {
         throw new Error('Published manifest differs from the readiness record');
@@ -178,6 +185,8 @@ export class Publisher {
       }
       return imageName(repo) + '@' + digest;
     }
+    if (expectedDigest) throw new Error('No successful publisher attempt for this PR and SHA');
+    throw new Error('No verified publication for this PR and SHA');
   }
 
   handle(mode, event, env) {

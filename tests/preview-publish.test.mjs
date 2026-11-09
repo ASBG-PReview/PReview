@@ -202,6 +202,75 @@ for (const [scenario, error] of [
   });
 }
 
+test('resolve keeps the signed digest after a retry hits a label API 503', () => {
+  const pub = publisher();
+  const pr = livePR();
+  const history = [];
+  const buildSha = 'c'.repeat(40);
+  const retryUrl = repo.html_url + '/actions/runs/42/attempts/3';
+  const attempts = new Map([[2, { status: 'completed', conclusion: 'success' }],
+    [3, { status: 'in_progress', conclusion: null }]]);
+  let manifest = Buffer.from('manifest');
+  let signatureAvailable = true;
+
+  pub.api = (path, options) => {
+    if (path === '') return repo;
+    if (path === '/pulls/17') return pr;
+    if (path === '/actions/workflows/pr-publish.yml') return { id: 77 };
+    if (path === '/statuses/' + sha && options.method === 'POST') {
+      history.unshift({ ...options.body, creator: { login: 'github-actions[bot]' } });
+      return;
+    }
+    if (path === '/commits/' + pr.head.sha + '/statuses?per_page=100&page=1' && pr.head.sha !== sha) return [];
+    for (const page of [1, 2]) {
+      if (path === '/commits/' + sha + '/statuses?per_page=100&page=' + page) {
+        return history.slice((page - 1) * 100, page * 100);
+      }
+    }
+    for (const [attempt, outcome] of attempts) {
+      if (path === '/actions/runs/42/attempts/' + attempt) return { ...outcome, id: 42,
+        run_attempt: attempt, head_sha: buildSha, event: 'workflow_run', workflow_id: 77,
+        path: publishPath, repository: repo, head_repository: repo, head_branch: 'main' };
+    }
+    assert.fail('Unexpected API path ' + path);
+  };
+  pub.command = (program, args) => {
+    if (program === 'skopeo') {
+      assert.deepEqual(args, ['inspect', '--raw', 'docker://' + tag]);
+      return manifest;
+    }
+    assert.equal(program, 'gh');
+    if (args[0] === 'api') throw new Error('label API returned 503');
+    assert.deepEqual(args.slice(0, 2), ['attestation', 'verify']);
+    const bytes = readFileSync(args[2]);
+    if (bytes.equals(signed) && !signatureAvailable) throw new Error('signature rejected');
+    assert.ok(bytes.equals(signed) || bytes.equals(Buffer.from(signed.toString().replace('"run_attempt":2', '"run_attempt":3'))));
+  };
+  // Both attempts signed a receipt. Only the first completed its label job.
+  const label = pub.ensureLabel.bind(pub);
+  pub.ensureLabel = () => {};
+  pub.recordAndLabel(repo, pr, digest, 42, 2);
+  assert.equal(pub.resolve(17, sha), image + '@' + digest);
+  // Put the successful record on page two once the retry adds its own status.
+  history.unshift(...Array.from({ length: 99 }, () => ({ context: 'build' })));
+  pub.ensureLabel = label;
+  assert.throws(() => pub.recordAndLabel(repo, pr, digest, 42, 3), /503/);
+  assert.equal(history[0].target_url, retryUrl);
+  assert.equal(pub.resolve(17, sha), image + '@' + digest);
+  attempts.set(3, { status: 'completed', conclusion: 'failure' });
+  assert.equal(pub.resolve(17, sha), image + '@' + digest);
+  manifest = Buffer.from('tampered');
+  assert.throws(() => pub.resolve(17, sha), /manifest differs/);
+  manifest = Buffer.from('manifest');
+  signatureAvailable = false;
+  assert.throws(() => pub.resolve(17, sha), /signature rejected/);
+  signatureAvailable = true;
+  history[100] = { ...history[100], description: digestOf('another image') };
+  assert.throws(() => pub.resolve(17, sha), /digest/);
+  pr.head.sha = 'b'.repeat(40);
+  assert.throws(() => pub.resolve(17, pr.head.sha), /No verified publication/);
+});
+
 const script = name => fileURLToPath(new URL('../scripts/' + name, import.meta.url));
 
 test('a cold retry recovers only the signed PR-specific digest across publisher attempts', t => {
