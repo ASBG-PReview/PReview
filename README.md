@@ -1,5 +1,8 @@
 # PReview
 
+Argo CD로 로컬 minikube에 검증된 PR 이미지를 배포하는 절차는
+[로컬 미리보기](docs/local-preview.md)를 참고하세요.
+
 PR별 미리보기 환경에 사용하는 Java 21 Spring Boot 서비스입니다. GitHub Actions가 Docker 빌드를 실행하고 Gradle이 실행 가능한 JAR를 만듭니다. Node.js 표준 라이브러리로 빌드 파일을 선택하고 이미지 발행·배포를 검증합니다.
 
 ## 로컬 실행

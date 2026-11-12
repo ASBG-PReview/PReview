@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: node --test tests/preview-publish.test.mjs
+      - run: node --test tests/preview-publish.test.mjs tests/local-previews.test.mjs
       - name: Verify PR chart inputs and rendered Pod
         run: bash tests/preview-chart.sh
   docker:
