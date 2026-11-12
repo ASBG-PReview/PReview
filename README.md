@@ -40,3 +40,18 @@ node scripts/preview-publish.mjs resolve ASBG-PReview/PReview "$PR_NUMBER" "$HEA
 최신 main에서 작업별 `feat/…`, `fix/…`, `chore/…` 브랜치를 만들고 한 PR에 한 목적을 담습니다. 작업 중에는 Draft로 공유합니다. `CI required` 통과, 리뷰 대화 해결, 작성자 외 팀원 1명 승인 후 작성자가 squash 머지합니다. 커밋이 추가되면 재승인이 필요합니다.
 
 main 직접 push·force push·삭제는 금지합니다. 관리자 예외는 승인 1건에만 적용되며 사용 시 PR에 이유를 기록합니다. 인증정보와 `.env`는 커밋하지 않습니다. [팀 저장소 규칙](https://github.com/ASBG-PReview/PReview/rules)
+
+## Helm 배포 및 버전 조회
+
+차트는 `charts/preview-api`에 있습니다. `/version`은 빌드에 포함된 애플리케이션 버전을 반환합니다(예: `{"version":"0.0.1"}`). 버전 시연을 위한 PR에서는 `preview-api/src/main/version.txt`의 값을 변경합니다. CI는 실제 컨테이너 응답이 이 값과 일치하는지 확인합니다. `Chart.yaml`의 `version`은 차트 자체의 버전이고 `appVersion`은 차트가 설명하는 애플리케이션 버전입니다.
+
+```sh
+helm lint charts/preview-api --set-string image.digest="$IMAGE_DIGEST"
+helm upgrade --install preview-pr-12 charts/preview-api \
+  --namespace preview-pr-12 --create-namespace \
+  --set-string preview.prNumber=12 \
+  --set-string preview.commitSha="$HEAD_SHA" \
+  --set-string image.digest="$IMAGE_DIGEST"
+```
+
+`IMAGE_DIGEST`에는 위 `resolve` 결과에서 이미지 이름 뒤의 `sha256:…` 부분을 전달합니다. 차트는 digest가 없거나 형식이 잘못되면 설치를 거부합니다. 형식 검사는 이미지의 신뢰성을 보장하지 않으므로 반드시 `resolve`로 검증한 digest를 사용합니다. 차트는 Deployment와 내부 ClusterIP Service를 생성하며, 외부 라우팅과 PR 종료 시 정리는 배포 컨트롤러가 담당합니다.

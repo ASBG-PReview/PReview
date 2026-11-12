@@ -44,6 +44,11 @@ jobs:
           test "$status" = 200
           jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
             .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/env.json"
+          expected_version=$(cat preview-api/src/main/version.txt)
+          test -n "$expected_version"
+          curl -fsS --max-time 5 -o "$RUNNER_TEMP/version.json" "$base/version"
+          jq -es --arg expected "$expected_version" \
+            'length == 1 and .[0].version == $expected' "$RUNNER_TEMP/version.json"
           container=$(docker compose ps -q preview-api)
           test "$(docker inspect -f '{{.State.Health.Status}}' "$container")" = healthy
           test "$(docker exec "$container" id -u)" -gt 0
