@@ -21,6 +21,8 @@ jobs:
         with:
           persist-credentials: false
       - run: node --test tests/preview-publish.test.mjs
+      - name: Verify PR chart inputs and rendered Pod
+        run: bash tests/preview-chart.sh
   docker:
     name: Spring image and registry test
     runs-on: ubuntu-24.04

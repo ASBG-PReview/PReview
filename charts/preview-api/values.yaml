@@ -6,10 +6,20 @@ image:
   digest: ""
   pullPolicy: IfNotPresent
 
+imagePullSecrets: []
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
 service:
   type: ClusterIP
   port: 8080
 
 preview:
-  prNumber: local
-  commitSha: unknown
+  prNumber: ""
+  commitSha: ""

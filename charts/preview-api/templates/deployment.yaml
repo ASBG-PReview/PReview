@@ -2,6 +2,12 @@
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
 {{- fail "image.digest는 sha256: 뒤에 64자리 소문자 16진수여야 합니다" -}}
 {{- end -}}
+{{- if not (regexMatch "^[1-9][0-9]*$" (toString .Values.preview.prNumber)) -}}
+{{- fail "preview.prNumber에 양의 정수 PR 번호를 지정해야 합니다" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-f]{40}$" (toString .Values.preview.commitSha)) -}}
+{{- fail "preview.commitSha에 40자리 소문자 16진수 커밋 SHA를 지정해야 합니다" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -18,10 +24,19 @@ spec:
       labels:
         {{- include "preview-api.selectorLabels" . | nindent 8 }}
     spec:
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: preview-api
           image: {{ printf "%s@%s" .Values.image.repository $digest | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
           ports:
             - name: http
               containerPort: 8080
@@ -34,6 +49,12 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
           readinessProbe:
             httpGet:
               path: /health
