@@ -7,7 +7,11 @@ plugins {
 ext['tomcat.version'] = '10.1.61'
 
 group = 'com.preview'
-version = '0.0.1'
+version = file('src/main/version.txt').text.trim()
+
+springBoot {
+    buildInfo()
+}
 
 java {
     toolchain {
