@@ -1,0 +1,83 @@
+name: Verify this PR's team GHCR publication
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  statuses: read
+  packages: read
+  attestations: read
+jobs:
+  verify:
+    if: github.head_ref == 'codex/verify-team-ghcr' && github.event.pull_request.head.repo.id == github.event.repository.id
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: fb151788cc8c1f29d076eded9d0381b7e053071b
+          persist-credentials: false
+      - name: Wait for the protected publisher to complete
+        shell: bash
+        run: |
+          for i in {1..60}; do
+            url=$(gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/statuses?per_page=100" |
+              jq -r --arg ctx "preview/ready/pr-$PR_NUMBER" 'map(select(.context == $ctx))[0].target_url // empty')
+            if [[ "$url" =~ /actions/runs/([0-9]+)/attempts/([0-9]+)$ ]]; then
+              id=${BASH_REMATCH[1]}; attempt=${BASH_REMATCH[2]}
+              run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/attempts/$attempt")
+              if [[ $(jq -r .status <<< "$run") == completed ]]; then
+                test "$(jq -r .conclusion <<< "$run")" = success
+                echo "PUBLISH_ID=$id" >> "$GITHUB_ENV"
+                echo "PUBLISH_ATTEMPT=$attempt" >> "$GITHUB_ENV"
+                echo "SIGNER_SHA=$(jq -r .head_sha <<< "$run")" >> "$GITHUB_ENV"
+                break
+              fi
+            fi
+            if (( i == 60 )); then echo 'Publication did not complete' >&2; exit 1; fi
+            sleep 12
+          done
+      - name: Resolve the signed image and verify both GitHub attestations
+        shell: bash
+        run: |
+          printf '%s' "$GH_TOKEN" | skopeo login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          resolved=$(node scripts/preview-publish.mjs resolve "$GITHUB_REPOSITORY" "$PR_NUMBER" "$HEAD_SHA")
+          digest=${resolved##*@}
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          tag="$image:pr-$PR_NUMBER-$HEAD_SHA"
+          skopeo inspect --raw "docker://$tag" > "$RUNNER_TEMP/manifest"
+          test "$resolved" = "$image@$(skopeo manifest-digest "$RUNNER_TEMP/manifest")"
+          skopeo inspect --config "docker://$resolved" | jq -e '.config.Labels["org.opencontainers.image.revision"] == env.HEAD_SHA'
+          export DIGEST="$digest"
+          node --input-type=module <<'JS'
+          import { intent, receipt } from './scripts/preview-publish.mjs';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const { repository, pull_request } = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH));
+          const { RUNNER_TEMP, DIGEST, PUBLISH_ID, PUBLISH_ATTEMPT } = process.env;
+          writeFileSync(RUNNER_TEMP + '/preview-intent.json', intent(repository, pull_request, DIGEST));
+          writeFileSync(RUNNER_TEMP + '/preview-publication.json', receipt(repository, pull_request, DIGEST, Number(PUBLISH_ID), Number(PUBLISH_ATTEMPT)));
+          JS
+          signer="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/.github/workflows/pr-publish.yml@refs/heads/main"
+          for file in preview-intent preview-publication; do
+            gh attestation verify "$RUNNER_TEMP/$file.json" --repo "$GITHUB_REPOSITORY" \
+              --cert-identity "$signer" --source-ref refs/heads/main --source-digest "$SIGNER_SHA" --deny-self-hosted-runners
+          done
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" | jq -e '.head.sha == env.HEAD_SHA and any(.labels[]; .name == "preview")'
+          echo "RESOLVED=$resolved" >> "$GITHUB_ENV"
+          echo "Verified tag $tag, both signatures, preview label and resolved image $resolved" | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: Run the resolved image and read this PR's marker
+        shell: bash
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          trap 'docker rm -f proof >/dev/null 2>&1 || true; docker logout ghcr.io >/dev/null' EXIT
+          docker run -d --name proof --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges -p 127.0.0.1:18080:8080 "$RESOLVED"
+          marker=$(curl -fsS --retry 20 --retry-all-errors --retry-delay 1 http://127.0.0.1:18080/team-ghcr-proof.txt)
+          test "$marker" = team-ghcr-preview-proof-fb151788
+          echo "PR marker confirmed from $RESOLVED" >> "$GITHUB_STEP_SUMMARY"
