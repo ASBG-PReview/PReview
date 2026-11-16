@@ -29,6 +29,11 @@ metadata:
     {{- include "preview-api.selectorLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       {{- include "preview-api.selectorLabels" . | nindent 6 }}
