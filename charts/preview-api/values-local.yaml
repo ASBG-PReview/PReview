@@ -1,0 +1,9 @@
+image:
+  repository: preview-api
+  tag: "0.0.1"
+  pullPolicy: IfNotPresent
+
+ingress:
+  enabled: true
+  className: nginx
+  path: /

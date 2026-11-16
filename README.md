@@ -27,7 +27,7 @@ docker compose down
 
 ## 배포 입력
 
-PR별 ApplicationSet 구성과 적용 전 준비 사항은 [Argo CD 안내](argocd/README.md)를 참고합니다.
+PR별 ApplicationSet 구성과 적용 전 준비 사항은 [argocd/README.md](argocd/README.md), 상태 파일을 갱신하는 GitHub Actions의 동작과 운영 전제는 [작업 보고서](docs/github-actions-preview-report.md)를 참고합니다. 실제 GitHub와 클러스터에서의 통합 검증은 아직 필요합니다.
 
 보호된 main에서 열린 PR의 번호와 전체 head SHA를 전달합니다. Node.js 22 이상, GitHub CLI(`gh attestation verify` 지원), Skopeo와 GitHub·GHCR 읽기 권한이 필요합니다.
 
@@ -47,28 +47,30 @@ main 직접 push·force push·삭제는 금지합니다. 관리자 예외는 승
 
 차트는 `charts/preview-api`에 있습니다. `/version`은 빌드에 포함된 애플리케이션 버전을 반환합니다(예: `{"version":"0.0.1"}`). 버전 시연을 위한 PR에서는 `preview-api/src/main/version.txt`의 값을 변경합니다. CI는 실제 컨테이너 응답이 이 값과 일치하는지 확인합니다. `Chart.yaml`의 `version`은 차트 자체의 버전이고 `appVersion`은 차트가 설명하는 애플리케이션 버전입니다.
 
-아래 예시는 Bash 기준입니다. 배포 컨트롤러는 PR별 namespace를 먼저 만들고, 그 안에 팀 GHCR 이미지를 읽을 수 있는 `ghcr-pull` Secret을 준비합니다. 처음 생성할 때는 `GHCR_CONFIG`에 팀 패키지 읽기 전용 인증이 담긴 Docker 설정 파일의 경로를 지정합니다.
+로컬 minikube를 시작한 뒤 저장소 루트에서 다음 명령을 순서대로 실행합니다. `make deploy`는 로컬 네임스페이스를 만들고 `quota.yaml`의 ResourceQuota와 LimitRange를 적용합니다. `make test`는 임시 포트 연결을 열어 상태, 환경 정보와 버전을 확인합니다. Python 3와 curl이 필요하며 기본 로컬 포트는 18080입니다.
 
 ```sh
-namespace="preview-pr-${PR_NUMBER:?}"
-kubectl create namespace "$namespace"
-kubectl -n "$namespace" create secret generic ghcr-pull \
-  --type=kubernetes.io/dockerconfigjson \
-  --from-file=".dockerconfigjson=${GHCR_CONFIG:?}"
+make build
+make load
+make lint
+make deploy
+make test
+make clean
 ```
 
-배포할 때마다 보호된 main에서 현재 PR의 전체 head SHA로 `resolve`를 실행합니다. 검증에 성공하면 같은 PR 번호, SHA, digest를 차트에 전달합니다.
+기본 네임스페이스는 `preview-local`입니다. 값을 바꿀 때는 배포와 테스트에 동일하게 전달합니다(예: `make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 Helm 배포를 삭제하며 로컬 네임스페이스와 할당량은 유지합니다. 로컬 Ingress를 사용하려면 minikube ingress 애드온을 활성화해야 합니다.
 
-```bash
-set -e
-image=$(node scripts/preview-publish.mjs resolve ASBG-PReview/PReview "${PR_NUMBER:?}" "${HEAD_SHA:?}")
-release="preview-pr-$PR_NUMBER"
-values=(--set-string "preview.prNumber=$PR_NUMBER"
-        --set-string "preview.commitSha=$HEAD_SHA"
-        --set-string "image.digest=${image##*@}"
-        --set-string 'imagePullSecrets[0].name=ghcr-pull')
-helm lint charts/preview-api "${values[@]}"
-helm upgrade --install "$release" charts/preview-api --namespace "$release" "${values[@]}" --wait
+```sh
+helm lint charts/preview-api -f charts/preview-api/values-local.yaml
+helm upgrade --install preview-pr-12 charts/preview-api \
+  --namespace "$TEAM_NAMESPACE" -f charts/preview-api/values-eks.yaml \
+  --set-string preview.prNumber=12 \
+  --set-string preview.commitSha="$HEAD_SHA" \
+  --set-string image.digest="$IMAGE_DIGEST" \
+  --set-string ingress.path="$TEAM_PATH" \
+  --set-string 'ingress.annotations.alb\.ingress\.kubernetes\.io/group\.name'="$ALB_GROUP"
 ```
 
-노드 또는 namespace의 기본 ServiceAccount가 이미 GHCR 읽기 인증을 제공한다면 `imagePullSecrets` 옵션을 생략할 수 있습니다. 차트는 PR 번호, 전체 커밋 SHA와 digest 형식을 검사하고 Deployment와 내부 ClusterIP Service를 생성합니다. CPU와 메모리 요청량·상한은 `resources`에서 조정합니다. 외부 라우팅과 PR 종료 시 정리는 배포 컨트롤러가 담당합니다.
+`TEAM_NAMESPACE`, `TEAM_PATH`, `ALB_GROUP`은 운영진이 안내한 값으로 설정합니다. `IMAGE_DIGEST`에는 위 `resolve` 결과에서 이미지 이름 뒤의 `sha256:…` 부분을 전달합니다. digest를 지정하면 태그보다 우선하며, 형식 검사만으로 이미지의 신뢰성을 보장할 수 없으므로 PR 배포에는 `resolve`로 검증한 digest를 사용합니다. 로컬에서는 `values-local.yaml`의 버전 태그를 사용할 수 있습니다. 차트는 Deployment, ClusterIP Service와 활성화된 경우 Ingress를 생성하며 네임스페이스는 만들지 않습니다.
+
+Ingress의 경로는 요청을 그대로 전달합니다. `/health` 등 애플리케이션의 루트 경로를 사용하는 API가 팀별 접두 경로에서도 동작하려면 Ingress 컨트롤러의 경로 변환 또는 애플리케이션 설정을 별도로 확인해야 합니다. 로컬 Ingress를 사용하려면 minikube의 nginx ingress 애드온이 필요합니다. 리소스 기본값은 컨테이너당 CPU 50m/200m, 메모리 128Mi/256Mi(request/limit)이며 네임스페이스의 전체 할당량을 다른 배포와 함께 고려해야 합니다.
