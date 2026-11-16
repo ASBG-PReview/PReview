@@ -37,3 +37,9 @@ for invalid in 'image.digest=' 'image.digest=latest' 'preview.prNumber=' \
     exit 1
   fi
 done
+
+helm template preview-local "$chart" -f "$chart/values-local.yaml" >/dev/null
+if helm template preview-local "$chart" -f "$chart/values-local.yaml" --set manageNamespace=true >/dev/null 2>&1; then
+  echo 'Local mode must not manage PR namespaces' >&2
+  exit 1
+fi

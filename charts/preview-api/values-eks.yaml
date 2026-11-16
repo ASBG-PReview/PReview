@@ -1,0 +1,11 @@
+image:
+  repository: ghcr.io/asbg-preview/preview
+
+ingress:
+  enabled: true
+  className: alb
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+  # 운영진이 안내한 공용 ALB group.name과 팀 경로를 배포 시 지정합니다.
+  path: ""

@@ -21,4 +21,4 @@ kubectl get applications -n argocd
 
 상태 파일 변경은 Git generator가 주기적으로 조회합니다. 기본 설정은 60초지만 repo-server 캐시 등으로 더 늦게 반영될 수 있습니다. Application 삭제 시 finalizer가 차트의 리소스를 삭제하도록 `preserveResourcesOnDeletion: false`를 설정했습니다. 차트가 명시적으로 관리하는 PR별 Namespace를 삭제할 때 그 안에 있는 Secret 등도 함께 삭제됩니다. GHCR 이미지는 별도입니다. 실제 삭제와 재시도는 클러스터에서 검증해야 합니다.
 
-자동화가 준비되기 전 임의의 digest로 상태 파일을 작성해 실제 배포하지 마세요. ApplicationSet에는 Git 상태 파일의 서명 검증 기능이 없습니다. 현재 Minikube가 arm64라면 각 이미지가 arm64를 지원하는지도 배포 전에 확인해야 합니다.
+자동화가 준비되기 전 임의의 digest로 상태 파일을 작성해 실제 배포하지 마세요. ApplicationSet에는 Git 상태 파일의 서명 검증 기능이 없습니다.

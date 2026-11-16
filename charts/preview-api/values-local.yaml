@@ -1,0 +1,14 @@
+image:
+  repository: preview-api
+  tag: "0.0.1"
+  pullPolicy: IfNotPresent
+
+preview:
+  local: true
+  prNumber: local
+  commitSha: unknown
+
+ingress:
+  enabled: true
+  className: nginx
+  path: /

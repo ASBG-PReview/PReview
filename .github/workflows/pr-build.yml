@@ -17,7 +17,7 @@ jobs:
       github.event.pull_request.head.repo.id == github.event.repository.id &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.actor != 'dependabot[bot]'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 25
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -39,6 +39,7 @@ jobs:
           docker build --label "org.opencontainers.image.revision=$COMMIT_SHA" \
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             -t preview-build:tested "$RUNNER_TEMP/preview-context"
+          test "$(docker image inspect preview-build:tested --format '{{.Os}}/{{.Architecture}}')" = linux/arm64
       - name: Verify health, PR identity, and version on port 8080
         run: |
           docker run -d --name preview-smoke --cap-drop ALL --security-opt no-new-privileges \
