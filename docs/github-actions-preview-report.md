@@ -1,0 +1,55 @@
+# PR Preview: GitHub Actions 작업 보고서
+
+## 목적과 현재 상태
+
+현재 `pr-build.yml`과 `pr-publish.yml`은 같은 저장소의 main 대상 PR을 빌드하고, 검증된 이미지를 GHCR에 발행한 뒤 서명 기록과 `preview` 라벨을 남깁니다. `scripts/preview-publish.mjs resolve`는 열린 PR의 현재 전체 SHA, 라벨, 서명 기록과 GHCR manifest digest를 확인합니다. `preview-state.yml`과 `reconcile-preview-state.mjs`는 검증된 결과를 기록하고 종료된 PR을 정리합니다. 실제 GitHub 실행 및 ApplicationSet 연동 검증은 아직 필요합니다.
+
+## 추가할 작업
+
+| 작업 | 동작 | 실패 시 |
+| --- | --- | --- |
+| 검증 결과 기록 | 보호된 main의 코드로 현재 PR SHA에 대해 `resolve`를 실행하고 성공한 SHA와 digest를 함께 기록 | 기존 파일 유지 |
+| 종료 정리 | PR이 실제로 closed 또는 merged인지 재확인한 후 해당 파일 삭제 | 확인 또는 Git 쓰기 실패 시 기존 파일 유지하고 재시도 |
+| 주기적 재조정 | 열린 PR과 배포 파일을 비교해 누락된 발행·종료 이벤트를 복구 | PR 목록 또는 접근 권한 확인 실패 시 삭제하지 않음 |
+
+## ApplicationSet과의 계약
+
+이 저장소의 별도 보호 브랜치 `preview-state`에 아래 경로를 사용합니다. 브랜치는 운영자가 최초에 만들고, 신뢰된 자동화만 기록할 수 있도록 GitHub 저장소 규칙을 구성해야 합니다. 일반 PR 코드가 이 브랜치나 기록 작업을 수정해서는 안 됩니다. 현재 워크플로는 저장소 `GITHUB_TOKEN`의 `contents: write`를 사용하므로 토큰 자체가 특정 브랜치에 한정된 것은 아닙니다. `main` 보호와 `preview-state`의 쓰기 허용 규칙을 검증해야 하며, 권한을 더 좁히려면 별도 저장소나 GitHub App을 구성해야 합니다.
+
+`previews/pr-12/state.json` 예시 (모든 값은 문자열):
+
+```json
+{
+  "prNumber": "12",
+  "commitSha": "0123456789abcdef0123456789abcdef01234567",
+  "imageDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+}
+```
+
+예시 값은 형식 설명용이며 배포 가능한 이미지가 아닙니다. 작성자는 `resolve`가 반환한 `ghcr.io/asbg-preview/preview@sha256:…`에서 digest를 사용합니다. JSON 파일만으로 검증이 수행되는 것은 아니므로 `preview-state` 쓰기 권한이 신뢰 경계입니다. ApplicationSet은 이 브랜치를 읽기만 하며 라벨을 직접 검증하지 않습니다.
+
+## 작업 설계 조건
+
+1. 작업은 신뢰된 workflow와 보호된 main의 스크립트를 사용하고 PR의 코드를 권한 있는 작업에서 실행하지 않습니다. GH CLI, Node.js 22 이상, Skopeo, GitHub·GHCR 읽기 권한이 필요합니다.
+2. 이미지 발행 후 PR의 현재 head에 대해 `resolve`가 성공했을 때만 파일을 갱신합니다. 이미지 검증 실패나 API 오류를 파일 삭제로 해석하지 않습니다. 새 이미지가 준비되기 전에는 마지막으로 검증된 버전을 유지합니다.
+3. PR별 갱신·종료 작업을 같은 직렬화 경로로 처리하고, Git 브랜치의 최신 커밋을 기준으로 충돌을 감지해 재조회·재시도합니다. 쓰기 직전과 직후에 PR 상태와 head를 재확인하고, 변경이 확인되면 다시 조정합니다. Git과 GitHub PR 상태 사이에는 원자적 트랜잭션이 없으므로 단순히 쓰기 직전 한 번 확인하는 것만으로 경합이 완전히 없어지지는 않습니다.
+4. PR 종료와 재오픈, 늦게 끝난 이전 빌드, 이벤트 누락, 같은 PR의 연속 push를 처리합니다. 오래된 작업이 새 파일을 덮거나 종료 후 파일을 다시 만들지 않도록 최신 상태를 기준으로 재조정합니다.
+5. 변경이 없으면 커밋을 만들지 않고, GitHub API 오류·권한 오류 또는 불완전한 페이지 조회일 때는 정리를 보류합니다. 배포 정보를 갱신하거나 삭제할 권한과 비밀값은 PR 코드에 노출하지 않습니다.
+6. `GITHUB_TOKEN`이 `preview-state`에 쓸 수 있는지, `main` 보호가 그대로 유지되는지 실제 저장소 규칙을 확인합니다. 필요하면 전용 GitHub App 및 별도 저장소 등으로 쓰기 권한을 제한합니다.
+
+## 확인할 시나리오
+
+- PR 두 개가 각각 다른 파일·Application·Namespace·이미지를 가집니다.
+- PR A의 다음 빌드가 실패하는 동안 A의 기존 이미지와 PR B가 유지됩니다.
+- 연속 push에서 늦게 완료된 이전 작업이 최신 상태를 덮어쓰지 않습니다.
+- PR A 종료 후 A만 제거되고 B는 유지됩니다. 재오픈도 다시 조정됩니다.
+- API 오류, workflow 실패, 이벤트 누락 시 주기적 재조정으로 복구합니다.
+- 실제 Pod의 이미지 digest와 `/environment`의 SHA를 검증된 파일과 대조합니다.
+
+## 적용 및 제한
+
+- 기본 브랜치에 workflow와 스크립트가 반영돼야 `workflow_run`, `pull_request_target`, 예약 실행이 동작합니다. 이 workflow는 `pr-publish.yml` 성공 완료 후, PR 상태 변화, 15분 예약 또는 수동 실행 때 전체 PR을 재조정합니다. GitHub 예약 실행은 지연될 수 있습니다.
+- 관리자가 `preview-state` 브랜치를 먼저 생성하고, `GITHUB_TOKEN`의 저장소 쓰기 및 해당 브랜치 접근을 허용해야 합니다. GHCR 패키지의 `packages: read` 접근도 필요합니다. 토큰이나 인증 설정은 커밋하지 않습니다.
+- GitHub Actions 이벤트와 Git 변경은 원자적이지 않습니다. 작성 직후 PR이 바뀌면 실행을 실패로 표시하고 다음 이벤트 또는 예약 실행으로 다시 조정합니다. 상태 파일이 중간에 잠깐 오래된 값을 가질 가능성은 남습니다.
+- `preview` 라벨 제거만으로는 열린 PR의 기존 상태 파일을 삭제하지 않습니다. PR이 실제로 종료된 경우에만 삭제합니다.
+- 실제 GitHub 실행, GHCR 인증, 브랜치 보호 정책과 Argo CD의 생성·갱신·삭제는 아직 검증되지 않았습니다.
