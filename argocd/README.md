@@ -5,7 +5,7 @@
 ## 적용 전 준비
 
 1. 이 차트와 ApplicationSet 변경을 검토해 `main`에 반영합니다. ApplicationSet은 로컬 파일이 아니라 GitHub의 `main` 차트를 사용합니다.
-2. 신뢰할 수 있는 별도 `preview-state` 브랜치를 만들고 읽기·쓰기 권한을 설정합니다. 시작할 때는 일치하는 상태 파일이 없어야 합니다. 저장소가 비공개라면 Argo CD에 Git 읽기 인증을 설정합니다.
+2. `preview-state` 브랜치에 신뢰된 자동화만 쓰도록 권한을 설정합니다. 이 브랜치에 쓰기 권한이 있는 사용자는 배포 이미지를 바꿀 수 있으므로 보호가 필수입니다. 저장소가 비공개라면 Argo CD에 Git 읽기 인증을 설정합니다.
 3. PR별 Namespace에 GHCR의 패키지 읽기용 `ghcr-pull` Secret을 제공하는 별도 자동화를 준비합니다. 이 차트는 Secret을 참조하지만 생성하지 않습니다. 공개 이미지라면 ApplicationSet에서 `imagePullSecrets[0].name` 파라미터를 제거할 수 있습니다.
 4. AppProject와 Argo CD가 PR별 Namespace 생성·삭제 권한을 가지고 있는지, ApplicationSet 컨트롤러가 Application 삭제를 허용하는지 확인합니다. 기존 `preview-pr-<번호>` Namespace를 다른 목적으로 사용하지 마세요. 차트가 해당 Namespace를 관리하고 삭제합니다.
 5. GitHub Actions의 검증된 상태 파일 갱신·종료 정리 작업을 GitHub에서 테스트합니다. 파일이 없으면 Application은 생성되지 않습니다.

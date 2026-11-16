@@ -32,5 +32,6 @@ ingress:
   pathType: Prefix
 
 preview:
-  prNumber: local
-  commitSha: unknown
+  local: false
+  prNumber: ""
+  commitSha: ""

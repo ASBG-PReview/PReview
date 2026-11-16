@@ -58,7 +58,7 @@ make test
 make clean
 ```
 
-기본 네임스페이스는 `preview-local`입니다. 값을 바꿀 때는 배포와 테스트에 동일하게 전달합니다(예: `make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 Helm 배포를 삭제하며 로컬 네임스페이스와 할당량은 유지합니다. 로컬 Ingress를 사용하려면 minikube ingress 애드온을 활성화해야 합니다.
+기본 네임스페이스는 `preview-local`입니다. `values-local.yaml`은 로컬 모드를 명시적으로 켜서 태그 이미지와 테스트용 식별자를 허용합니다. 기본 PR 배포 모드는 검증된 digest와 양의 정수 PR 번호, 전체 커밋 SHA를 필수로 요구합니다. 값을 바꿀 때는 배포와 테스트에 동일하게 전달합니다(예: `make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 Helm 배포를 삭제하며 로컬 네임스페이스와 할당량은 유지합니다. 로컬 Ingress를 사용하려면 minikube ingress 애드온을 활성화해야 합니다.
 
 ```sh
 helm lint charts/preview-api -f charts/preview-api/values-local.yaml
