@@ -9,9 +9,6 @@ image:
 
 imagePullSecrets: []
 
-# PR 전용 Namespace만 Argo CD가 생성·삭제합니다.
-manageNamespace: false
-
 service:
   port: 8080
 
