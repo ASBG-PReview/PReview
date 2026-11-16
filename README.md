@@ -27,6 +27,8 @@ docker compose down
 
 ## 배포 입력
 
+PR별 ApplicationSet 구성과 적용 전 준비 사항은 [Argo CD 안내](argocd/README.md)를 참고합니다.
+
 보호된 main에서 열린 PR의 번호와 전체 head SHA를 전달합니다. Node.js 22 이상, GitHub CLI(`gh attestation verify` 지원), Skopeo와 GitHub·GHCR 읽기 권한이 필요합니다.
 
 ```sh

@@ -1,0 +1,51 @@
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: preview-prs
+  namespace: argocd
+spec:
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+  generators:
+    - git:
+        repoURL: https://github.com/ASBG-PReview/PReview.git
+        revision: preview-state
+        requeueAfterSeconds: 60
+        files:
+          - path: previews/pr-*/state.json
+  syncPolicy:
+    preserveResourcesOnDeletion: false
+  template:
+    metadata:
+      name: '{{ if not (regexMatch "^[1-9][0-9]*$" .prNumber) }}{{ fail "invalid prNumber" }}{{ end }}{{ if ne .path.basename (printf "pr-%s" .prNumber) }}{{ fail "path and prNumber do not match" }}{{ end }}preview-pr-{{ .prNumber }}'
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/ASBG-PReview/PReview.git
+        targetRevision: main
+        path: charts/preview-api
+        helm:
+          releaseName: 'preview-pr-{{ .prNumber }}'
+          parameters:
+            - name: preview.prNumber
+              value: '{{ .prNumber }}'
+              forceString: true
+            - name: preview.commitSha
+              value: '{{ if not (regexMatch "^[0-9a-f]{40}$" .commitSha) }}{{ fail "invalid commitSha" }}{{ end }}{{ .commitSha }}'
+              forceString: true
+            - name: image.repository
+              value: ghcr.io/asbg-preview/preview
+            - name: image.digest
+              value: '{{ if not (regexMatch "^sha256:[0-9a-f]{64}$" .imageDigest) }}{{ fail "invalid imageDigest" }}{{ end }}{{ .imageDigest }}'
+              forceString: true
+            - name: manageNamespace
+              value: 'true'
+            - name: imagePullSecrets[0].name
+              value: ghcr-pull
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: 'preview-pr-{{ .prNumber }}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
