@@ -38,13 +38,12 @@ spec:
             - name: image.digest
               value: '{{ if not (regexMatch "^sha256:[0-9a-f]{64}$" .imageDigest) }}{{ fail "invalid imageDigest" }}{{ end }}{{ .imageDigest }}'
               forceString: true
-            - name: manageNamespace
-              value: 'true'
             - name: imagePullSecrets[0].name
               value: ghcr-pull
       destination:
         server: https://kubernetes.default.svc
-        namespace: 'preview-pr-{{ .prNumber }}'
+        # 적용 전에 운영진이 할당한 팀 네임스페이스로 변경하세요.
+        namespace: replace-with-team-namespace
       syncPolicy:
         automated:
           prune: true

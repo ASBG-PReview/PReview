@@ -1,10 +1,6 @@
 {{- $digest := .Values.image.digest | default "" -}}
 {{- $tag := .Values.image.tag | default "" -}}
-{{- if .Values.preview.local -}}
-{{- if .Values.manageNamespace -}}
-{{- fail "로컬 모드에서는 manageNamespace를 사용할 수 없습니다" -}}
-{{- end -}}
-{{- else -}}
+{{- if not .Values.preview.local -}}
 {{- if not (regexMatch "^sha256:[0-9a-f]{64}$" $digest) -}}
 {{- fail "PR Preview에는 검증된 image.digest가 필요합니다" -}}
 {{- end -}}
@@ -33,6 +29,11 @@ metadata:
     {{- include "preview-api.selectorLabels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 0
+      maxUnavailable: 1
   selector:
     matchLabels:
       {{- include "preview-api.selectorLabels" . | nindent 6 }}
