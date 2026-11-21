@@ -1,5 +1,18 @@
 # ApplicationSet 설정
 
+## Minikube의 Argo CD에서 팀 EKS에 PR별 Ingress 배포
+
+이 브랜치의 차트가 main에 반영된 뒤, Argo CD에 등록된 EKS의 서버 주소와 운영진이 지정한 공용 ALB 그룹명을 사용합니다. 다음 명령은 적용할 YAML을 로컬에 출력합니다. 수민님이 사용 중인 ApplicationSet과 대조한 뒤 해당 Argo CD에서 적용합니다.
+
+```bash
+EKS_SERVER='https://실제-EKS-엔드포인트' ALB_GROUP='실제-공용-그룹' \
+  bash argocd/render-eks.sh > applicationset-eks.yaml
+```
+
+PR별 Application은 팀 namespace에 Deployment, Service, Ingress를 하나씩 관리합니다. 예를 들어 `/container-2/pr-17/version`은 #17 Service에 `/version`으로 전달됩니다. 대상 그룹의 상태 검사 경로는 `/health`입니다. PR 상태 파일이 삭제되면 기존 ApplicationSet의 삭제 정책에 따라 해당 Application과 Ingress가 함께 정리됩니다.
+
+경로 변환은 [AWS Load Balancer Controller v2.14.1에서 추가된 기능](https://github.com/kubernetes-sigs/aws-load-balancer-controller/releases/tag/v2.14.1)입니다. 운영진에게 컨트롤러의 버전, 공유 그룹과 허용 경로를 확인합니다. 같은 그룹에 `/container-2` 전체를 받는 기존 규칙이 있다면 PR별 규칙이 먼저 평가되도록 운영진과 순서를 맞춥니다. 적용 후 외부에서 두 PR의 `/version`을 호출하고, 하나를 닫은 뒤 그 Ingress만 사라지고 다른 PR이 계속 응답하는지 확인합니다.
+
 `applicationset.yaml`은 이 저장소의 `preview-state` 브랜치에서 `previews/pr-*/state.json`을 읽어 PR별 Application을 생성합니다. 상태 파일은 반드시 검증된 작성자만 생성해야 하며, 파일이 남아 있는 동안에는 최신 PR 빌드가 실패해도 마지막 배포를 유지합니다. ApplicationSet 자체는 PR 상태·라벨·서명을 확인하지 않습니다. 작성·삭제 워크플로와 운영 전제는 `docs/github-actions-preview-report.md`에 정리했습니다.
 
 ## 적용 전 준비
@@ -19,7 +32,15 @@ kubectl get applicationsets -n argocd
 kubectl get applications -n argocd
 ```
 
-상태 파일 변경은 Git generator가 주기적으로 조회합니다. 기본 설정은 60초지만 repo-server 캐시 등으로 더 늦게 반영될 수 있습니다. Application 삭제 시 `preserveResourcesOnDeletion: false`를 통해 해당 Application의 리소스가 삭제됩니다. 팀 Namespace와 별도로 만든 `ghcr-pull` Secret은 차트가 관리하지 않으며 유지되어야 합니다. GHCR 이미지 삭제도 별도입니다. 공유 Namespace에서의 실제 삭제와 다른 PR 보존은 클러스터에서 검증해야 합니다.
+상태 파일 변경은 Git generator가 주기적으로 조회합니다. 기본 설정은 60초지만 repo-server 캐시 등으로 더 늦게 반영될 수 있습니다. Application 삭제 시 `preserveResourcesOnDeletion: false`를 통해 해당 Application의 리소스가 삭제됩니다. 팀 Namespace와 별도로 만든 `ghcr-pull` Secret은 유지합니다. 실제 리소스 회수와 다른 PR 보존은 클러스터에서 검증합니다.
+
+### PR 종료 시 GHCR 이미지 정리
+
+main 대상 PR을 닫거나 병합하면 GitHub Actions의 `Clean images exclusive to the closed PR` 작업이 실행됩니다. PR이 여전히 닫혀 있고 배포 상태 파일이 사라졌는지 확인한 뒤, GHCR의 모든 버전을 조회합니다. 태그가 전부 해당 PR의 `pr-번호-전체SHA` 형식인 버전만 정리하므로 이전 커밋의 이미지도 포함됩니다. main·다른 PR·사용자 태그와 공유하는 버전, 태그 없는 버전, 다른 배포 상태나 보존 대상 이미지 인덱스가 참조하는 digest는 유지합니다. 이 작업과 팀의 main·PR 발행 작업은 같은 실행 대기열을 사용합니다.
+
+운영 전제는 팀 GHCR 패키지가 저장소에 연결되어 있고 해당 저장소의 Actions에 패키지 **Admin** 권한이 있다는 것입니다. 권한 거부 시 정리 작업이 실패로 표시됩니다. [GitHub Packages의 Actions 삭제 권한](https://docs.github.com/en/packages/learn-github-packages/deleting-and-restoring-a-package)
+
+기존에 닫힌 PR이나 실패한 정리는 Actions → **Reconcile verified preview state** → **Run workflow**에서 main과 `cleanup_pr` 번호를 선택해 다시 검사할 수 있습니다. 수동 실행은 기본적으로 삭제 예정 버전만 출력합니다. 로그 확인 후 같은 번호로 `dry_run`을 해제하면 실제 정리합니다. 자동 종료 이벤트는 해당 PR 한 건만 처리합니다.
 
 ## 기존 PR별 Namespace에서 이전할 때
 

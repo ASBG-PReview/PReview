@@ -10,8 +10,7 @@ const digestPattern = /^sha256:[0-9a-f]{64}$/;
 
 // Collect complete snapshots before changing anything. A failed or truncated
 // listing must never be interpreted as evidence that a PR has closed.
-export function snapshot(publisher) {
-  const repo = publisher.api('');
+export function stateFiles(publisher) {
   const tree = publisher.api(`/git/trees/${branch}?recursive=1`);
   if (tree.truncated !== false || !Array.isArray(tree.tree)) throw new Error('Incomplete state tree');
   const files = new Map();
@@ -24,6 +23,22 @@ export function snapshot(publisher) {
     }
     files.set(number, entry.sha);
   }
+  return files;
+}
+
+export function readState(publisher, number, fileSha) {
+  const blob = publisher.api(`/git/blobs/${fileSha}`);
+  if (blob.encoding !== 'base64' || typeof blob.content !== 'string') throw new Error(`Invalid state blob: ${number}`);
+  const state = JSON.parse(Buffer.from(blob.content, 'base64').toString('utf8'));
+  if (state.prNumber !== String(number) || !fullSha.test(state.commitSha) || !digestPattern.test(state.imageDigest)) {
+    throw new Error(`Invalid state content: ${number}`);
+  }
+  return state;
+}
+
+export function snapshot(publisher) {
+  const repo = publisher.api('');
+  const files = stateFiles(publisher);
   const open = new Map();
   for (let page = 1; ; page++) {
     const rows = publisher.api(`/pulls?state=open&per_page=100&page=${page}`);
@@ -47,15 +62,7 @@ export function reconcile(publisher, log = console.log) {
   for (const number of numbers) {
     const fileSha = files.get(number);
     const filePath = pathFor(number);
-    let previous;
-    if (fileSha) {
-      const blob = publisher.api(`/git/blobs/${fileSha}`);
-      if (blob.encoding !== 'base64' || typeof blob.content !== 'string') throw new Error(`Invalid state blob: ${filePath}`);
-      previous = JSON.parse(Buffer.from(blob.content, 'base64').toString('utf8'));
-      if (previous.prNumber !== String(number) || !fullSha.test(previous.commitSha) || !digestPattern.test(previous.imageDigest)) {
-        throw new Error(`Invalid state content: ${filePath}`);
-      }
-    }
+    const previous = fileSha ? readState(publisher, number, fileSha) : undefined;
     let live = publisher.api(`/pulls/${number}`);
     if (live.number !== number || !['open', 'closed'].includes(live.state)) throw new Error(`Invalid PR state: ${number}`);
     if (live.state === 'closed') {

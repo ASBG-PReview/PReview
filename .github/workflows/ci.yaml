@@ -20,11 +20,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: node --test tests/preview-publish.test.mjs tests/preview-state.test.mjs
+      - run: node --test tests/preview-publish.test.mjs tests/preview-state.test.mjs tests/preview-cleanup.test.mjs
       - name: Verify PR chart inputs and rendered Pod
         run: bash tests/preview-chart.sh
       - name: Verify ApplicationSet chart resources
         run: bash tests/applicationset-chart.sh
+      - name: Verify shared EKS Ingress routes
+        run: bash tests/pr-ingress.sh
   docker:
     name: Spring image and registry test
     runs-on: ubuntu-24.04
@@ -111,6 +113,9 @@ jobs:
           jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
   publish:
     name: Publish main image
+    concurrency:
+      group: preview-ghcr-writer
+      queue: max
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: required
     runs-on: ubuntu-24.04

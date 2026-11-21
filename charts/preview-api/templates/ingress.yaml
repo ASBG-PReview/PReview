@@ -1,11 +1,23 @@
 {{- if .Values.ingress.enabled }}
+{{- $service := include "preview-api.fullname" . }}
+{{- $path := .Values.ingress.path }}
+{{- $annotations := deepCopy (.Values.ingress.annotations | default dict) }}
+{{- if .Values.ingress.perPR }}
+{{- if ne .Values.ingress.className "alb" }}{{ fail "perPR requires the alb IngressClass" }}{{ end }}
+{{- $_ := required "perPR requires a shared ALB group.name" (index $annotations "alb.ingress.kubernetes.io/group.name") }}
+{{- $path = printf "/%s/pr-%s" .Release.Namespace (toString .Values.preview.prNumber) }}
+{{- $rewrite := dict "regex" (printf "^%s(/(.*))?$" $path) "replace" "/$2" }}
+{{- $transform := dict "type" "url-rewrite" "urlRewriteConfig" (dict "rewrites" (list $rewrite)) }}
+{{- $_ = set $annotations (printf "alb.ingress.kubernetes.io/transforms.%s" $service) (toJson (list $transform)) }}
+{{- $_ = set $annotations "alb.ingress.kubernetes.io/healthcheck-path" "/health" }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: {{ include "preview-api.fullname" . }}
   labels:
     {{- include "preview-api.selectorLabels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- with $annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}
@@ -17,7 +29,7 @@ spec:
       {{- end }}
       http:
         paths:
-          - path: {{ required "ingress.path를 지정해야 합니다" .Values.ingress.path | quote }}
+          - path: {{ required "ingress.path를 지정해야 합니다" $path | quote }}
             pathType: {{ .Values.ingress.pathType }}
             backend:
               service:
