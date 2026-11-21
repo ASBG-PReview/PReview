@@ -32,7 +32,15 @@ kubectl get applicationsets -n argocd
 kubectl get applications -n argocd
 ```
 
-상태 파일 변경은 Git generator가 주기적으로 조회합니다. 기본 설정은 60초지만 repo-server 캐시 등으로 더 늦게 반영될 수 있습니다. Application 삭제 시 `preserveResourcesOnDeletion: false`를 통해 해당 Application의 리소스가 삭제됩니다. 팀 Namespace와 별도로 만든 `ghcr-pull` Secret은 차트가 관리하지 않으며 유지되어야 합니다. GHCR 이미지 삭제도 별도입니다. 공유 Namespace에서의 실제 삭제와 다른 PR 보존은 클러스터에서 검증해야 합니다.
+상태 파일 변경은 Git generator가 주기적으로 조회합니다. 기본 설정은 60초지만 repo-server 캐시 등으로 더 늦게 반영될 수 있습니다. Application 삭제 시 `preserveResourcesOnDeletion: false`를 통해 해당 Application의 리소스가 삭제됩니다. 팀 Namespace와 별도로 만든 `ghcr-pull` Secret은 유지합니다. 실제 리소스 회수와 다른 PR 보존은 클러스터에서 검증합니다.
+
+### PR 종료 시 GHCR 이미지 정리
+
+main 대상 PR을 닫거나 병합하면 GitHub Actions의 `Clean images exclusive to the closed PR` 작업이 실행됩니다. PR이 여전히 닫혀 있고 배포 상태 파일이 사라졌는지 확인한 뒤, GHCR의 모든 버전을 조회합니다. 태그가 전부 해당 PR의 `pr-번호-전체SHA` 형식인 버전만 정리하므로 이전 커밋의 이미지도 포함됩니다. main·다른 PR·사용자 태그와 공유하는 버전, 태그 없는 버전, 다른 배포 상태나 보존 대상 이미지 인덱스가 참조하는 digest는 유지합니다. 이 작업과 팀의 main·PR 발행 작업은 같은 실행 대기열을 사용합니다.
+
+운영 전제는 팀 GHCR 패키지가 저장소에 연결되어 있고 해당 저장소의 Actions에 패키지 **Admin** 권한이 있다는 것입니다. 권한 거부 시 정리 작업이 실패로 표시됩니다. [GitHub Packages의 Actions 삭제 권한](https://docs.github.com/en/packages/learn-github-packages/deleting-and-restoring-a-package)
+
+기존에 닫힌 PR이나 실패한 정리는 Actions → **Reconcile verified preview state** → **Run workflow**에서 main과 `cleanup_pr` 번호를 선택해 다시 검사할 수 있습니다. 수동 실행은 기본적으로 삭제 예정 버전만 출력합니다. 로그 확인 후 같은 번호로 `dry_run`을 해제하면 실제 정리합니다. 자동 종료 이벤트는 해당 PR 한 건만 처리합니다.
 
 ## 기존 PR별 Namespace에서 이전할 때
 
