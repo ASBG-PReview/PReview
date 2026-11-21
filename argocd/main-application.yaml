@@ -1,0 +1,24 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: preview-main
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/ASBG-PReview/PReview.git
+    targetRevision: main-deploy
+    path: charts/preview-api
+    helm:
+      releaseName: preview-main
+      valueFiles:
+        - values-eks.yaml
+        - values-main.yaml
+        - values-main-image.json
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: container-2
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true

@@ -1,11 +1,17 @@
-image:
-  repository: ghcr.io/asbg-preview/preview
-
+# Shared ALB settings; quota and LimitRange are managed by the operators.
+imagePullSecrets:
+  - name: ghcr-pull
+resources:
+  requests:
+    cpu: 50m
+    memory: 128Mi
+  limits:
+    cpu: 200m
+    memory: 320Mi
 ingress:
   enabled: true
   className: alb
   annotations:
+    alb.ingress.kubernetes.io/group.name: sbg-demo
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
-  # 운영진이 안내한 공용 ALB group.name과 팀 경로를 배포 시 지정합니다.
-  path: ""

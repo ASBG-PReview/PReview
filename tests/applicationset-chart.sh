@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 sha=0123456789abcdef0123456789abcdef01234567
 digest=sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 for pr in 17 18; do
-  helm template "preview-pr-$pr" charts/preview-api --namespace preview-team \
+  helm template "preview-pr-$pr" charts/preview-api --namespace container-2 \
     --set-string "preview.prNumber=$pr" --set-string "preview.commitSha=$sha" \
     --set-string "image.digest=$digest" --set-string 'imagePullSecrets[0].name=ghcr-pull' |
     ruby -e '
@@ -29,7 +29,7 @@ raise "wrong PR number" unless env["PR_NUMBER"] == pr
 raise "wrong SHA" unless env["COMMIT_SHA"] == ARGV.fetch(2)
 ' "$pr" "$digest" "$sha"
 done
-if helm template preview-pr-17 charts/preview-api --namespace preview-team \
+if helm template preview-pr-17 charts/preview-api --namespace container-2 \
   --set-string preview.prNumber=17 --set-string "preview.commitSha=$sha" >/dev/null 2>&1; then
   echo 'Expected missing digest to fail' >&2; exit 1
 fi
