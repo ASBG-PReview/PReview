@@ -25,6 +25,8 @@ jobs:
         run: bash tests/preview-chart.sh
       - name: Verify ApplicationSet chart resources
         run: bash tests/applicationset-chart.sh
+      - name: Verify shared EKS Ingress routes
+        run: bash tests/pr-ingress.sh
   docker:
     name: Spring image and registry test
     runs-on: ubuntu-24.04

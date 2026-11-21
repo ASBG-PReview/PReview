@@ -22,6 +22,7 @@ resources:
 
 ingress:
   enabled: false
+  perPR: false
   className: ""
   annotations: {}
   host: ""
