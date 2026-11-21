@@ -1,9 +1,11 @@
 services:
   preview-api:
     build: ./preview-api
+    platform: linux/amd64
     ports:
       - "127.0.0.1:8080:8080"
     environment:
+      BASE_PATH: "${BASE_PATH:-}"
       PR_NUMBER: "${PR_NUMBER:-local}"
       COMMIT_SHA: "${COMMIT_SHA:-local}"
       NAMESPACE: "${NAMESPACE:-local}"
