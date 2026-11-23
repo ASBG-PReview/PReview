@@ -27,6 +27,8 @@ jobs:
         run: bash tests/main-pr-chart.sh
       - name: Verify ApplicationSet chart resources
         run: bash tests/applicationset-chart.sh
+      - name: Verify shared EKS Ingress routes
+        run: bash tests/pr-ingress.sh
   docker:
     name: Spring image and registry test
     runs-on: ubuntu-24.04
@@ -114,6 +116,9 @@ jobs:
           jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
   publish:
     name: Publish main image
+    concurrency:
+      group: preview-ghcr-writer
+      queue: max
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: required
     runs-on: ubuntu-24.04
