@@ -8,6 +8,15 @@ on:
   schedule:
     - cron: '*/15 * * * *'
   workflow_dispatch:
+    inputs:
+      cleanup_pr:
+        description: 'Optional: retry GHCR cleanup for this closed PR number'
+        type: string
+        required: false
+      dry_run:
+        description: 'Only list images selected for manual cleanup'
+        type: boolean
+        default: true
 permissions: {}
 concurrency:
   group: preview-state-reconciliation
@@ -41,3 +50,41 @@ jobs:
           printf '%s' "$GH_TOKEN" | skopeo login --authfile "$authfile" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
           export REGISTRY_AUTH_FILE="$authfile"
           node scripts/reconcile-preview-state.mjs "$REPOSITORY"
+  cleanup:
+    name: Clean images exclusive to the closed PR
+    needs: reconcile
+    # An unrelated PR can fail reconciliation. The script independently requires
+    # the target PR to be closed and its state file to be absent.
+    if: >-
+      !cancelled() && ((github.event_name == 'pull_request_target' &&
+      github.event.action == 'closed' && github.event.pull_request.base.ref == github.event.repository.default_branch) ||
+      (github.event_name == 'workflow_dispatch' && inputs.cleanup_pr != '' &&
+      github.ref_name == github.event.repository.default_branch))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: preview-ghcr-writer
+      queue: max
+    permissions:
+      contents: read
+      pull-requests: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Delete exclusive package versions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.cleanup_pr }}
+          DELETE_VERSIONS: ${{ github.event_name == 'pull_request_target' || !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/preview-cleanup-auth.json"
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          args=("$REPOSITORY" "$PR_NUMBER")
+          if [[ "$DELETE_VERSIONS" == true ]]; then args+=(--apply); fi
+          node scripts/cleanup-preview-images.mjs "${args[@]}"
