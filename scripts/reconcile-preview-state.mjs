@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { Publisher, currentPR } from './preview-publish.mjs';
 
 const branch = 'preview-state';
+const maxPreviews = 2;
 const pathFor = number => `previews/pr-${number}/state.json`;
 const statePath = /^previews\/pr-([1-9][0-9]*)\/state\.json$/;
 const fullSha = /^[0-9a-f]{40}$/;
@@ -57,7 +58,10 @@ const sameState = (a, b) => a?.prNumber === b.prNumber && a?.commitSha === b.com
 
 export function reconcile(publisher, log = console.log) {
   const { repo, files, open } = snapshot(publisher);
-  const numbers = [...new Set([...open.keys(), ...files.keys()])].sort((a, b) => a - b);
+  // Reconcile existing slots first, so a closed PR can free a slot before
+  // waiting PRs are considered. Existing previews are never evicted for a new PR.
+  const numbers = [...new Set([...open.keys(), ...files.keys()])]
+    .sort((a, b) => Number(!files.has(a)) - Number(!files.has(b)) || a - b);
   let failures = 0;
   for (const number of numbers) {
     const fileSha = files.get(number);
@@ -83,10 +87,17 @@ export function reconcile(publisher, log = console.log) {
           content: Buffer.from(JSON.stringify(previous, null, 2) + '\n').toString('base64'),
         } });
         log(`PR #${number} reopened; restored prior state`);
-      } else log(`Removed PR #${number}`);
+      } else {
+        files.delete(number);
+        log(`Removed PR #${number}`);
+      }
       continue;
     }
     if (!isEligible(live, repo)) continue; // Keep an existing preview while open.
+    if (!fileSha && files.size >= maxPreviews) {
+      log(`PR #${number} waiting for a preview slot (${maxPreviews} maximum)`);
+      continue;
+    }
     const sha = live.head.sha;
     if (!fullSha.test(sha)) throw new Error(`Invalid head SHA: ${number}`);
     let image;
@@ -107,6 +118,7 @@ export function reconcile(publisher, log = console.log) {
       content: Buffer.from(JSON.stringify(next, null, 2) + '\n').toString('base64') };
     if (fileSha) body.sha = fileSha;
     publisher.api(`/contents/${filePath}`, { method: 'PUT', body });
+    if (!fileSha) files.set(number, 'created');
     log(`Updated PR #${number} at ${sha}`);
     live = publisher.api(`/pulls/${number}`);
     if (!isEligible(live, repo) || live.head.sha !== sha) {
