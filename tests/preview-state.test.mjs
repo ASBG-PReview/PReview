@@ -57,6 +57,36 @@ test('writes separate verified state for two PRs', () => {
   assert.deepEqual(p.writes.map(x => x.path), ['/contents/previews/pr-17/state.json', '/contents/previews/pr-18/state.json']);
   assert.deepEqual(payload(p.writes[0]), { prNumber: '17', commitSha: sha, imageDigest: digest });
 });
+test('admits at most two previews and keeps later PRs waiting', () => {
+  const p = fake({ open: [pr(19), pr(17), pr(18)] });
+  assert.equal(reconcile(p, quiet), 0);
+  assert.deepEqual(p.writes.map(x => payload(x).prNumber), ['17', '18']);
+});
+test('keeps existing previews instead of evicting them for an older waiting PR', () => {
+  const p = fake({ open: [pr(16), pr(17), pr(18)], states: { 17: old(17), 18: old(18) } });
+  assert.equal(reconcile(p, quiet), 0);
+  assert.deepEqual(p.writes.map(x => payload(x).prNumber), ['17', '18']);
+});
+test('frees a closed slot before admitting the lowest-numbered waiting PR', () => {
+  const p = fake({ open: [pr(10), pr(18), pr(19)], states: { 17: old(17), 18: old(18) } });
+  assert.equal(reconcile(p, quiet), 0);
+  assert.deepEqual(p.writes.map(x => [x.method, x.path]), [
+    ['DELETE', '/contents/previews/pr-17/state.json'],
+    ['PUT', '/contents/previews/pr-18/state.json'],
+    ['PUT', '/contents/previews/pr-10/state.json'],
+  ]);
+});
+test('does not admit a waiting PR when a closed PR reopens during deletion', () => {
+  const p = fake({ open: [pr(18), pr(19)], states: { 17: old(17), 18: old(18) },
+    live: { 17: [pr(17, 'closed'), pr(17, 'closed'), pr(17)] } });
+  assert.equal(reconcile(p, quiet), 0);
+  assert.equal(p.writes.some(x => x.path.includes('/pr-19/')), false);
+});
+test('does not evict or add previews when existing slots already exceed the limit', () => {
+  const p = fake({ open: [pr(17), pr(18), pr(19), pr(20)], states: { 17: old(17), 18: old(18), 19: old(19) } });
+  assert.equal(reconcile(p, quiet), 0);
+  assert.deepEqual(p.writes.map(x => payload(x).prNumber), ['17', '18', '19']);
+});
 test('preserves prior deployment when new image is not verified', () => {
   const p = fake({ states: { 17: old(17) }, resolveError: true });
   assert.equal(reconcile(p, quiet), 1);
