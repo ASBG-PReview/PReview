@@ -1,0 +1,9 @@
+{
+  "image": {
+    "repository": "ghcr.io/asbg-preview/preview",
+    "digest": "sha256:43bd8bba50b20de01d5e36fed2190095ac1b614a772304337331523842c32973"
+  },
+  "main": {
+    "commitSha": "ea2ac04693396c6bbb7045ddb260248eac922ba9"
+  }
+}
