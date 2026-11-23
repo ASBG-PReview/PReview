@@ -1,3 +1,4 @@
+{{- if and .Values.preview.local (eq .Values.deploymentMode "pr") }}
 {{- if .Values.ingress.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -24,4 +25,41 @@ spec:
                 name: {{ include "preview-api.fullname" . }}
                 port:
                   number: {{ .Values.service.port }}
+{{- end }}
+{{- else }}
+{{- if .Values.ingress.enabled }}
+{{- $base := include "preview-api.basePath" . -}}
+{{- $expected := "/container-2/main" -}}
+{{- if eq .Values.deploymentMode "pr" -}}
+{{- $expected = printf "/container-2/pr-%s" (toString .Values.preview.prNumber) -}}
+{{- end -}}
+{{- if ne $base $expected -}}{{- fail "Ingress basePath must match the main or PR team path" -}}{{- end -}}
+{{- if .Values.ingress.host -}}{{- fail "Shared ALB does not allow host" -}}{{- end -}}
+{{- if or (ne .Values.ingress.className "alb") (ne .Values.ingress.pathType "Prefix") -}}{{- fail "Shared ALB requires alb class and Prefix pathType" -}}{{- end -}}
+{{- if and .Values.ingress.path (ne .Values.ingress.path $base) -}}{{- fail "ingress.path must match basePath" -}}{{- end -}}
+{{- $allowed := dict "alb.ingress.kubernetes.io/group.name" "sbg-demo" "alb.ingress.kubernetes.io/scheme" "internet-facing" "alb.ingress.kubernetes.io/target-type" "ip" "alb.ingress.kubernetes.io/healthcheck-path" (printf "%s/health" $base) -}}
+{{- range $key, $value := .Values.ingress.annotations -}}
+{{- if or (not (hasKey $allowed $key)) (ne (toString $value) (get $allowed $key)) -}}{{- fail "Unsupported shared ALB annotation or value" -}}{{- end -}}
+{{- end -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "preview-api.fullname" . }}
+  labels:
+    {{- include "preview-api.selectorLabels" . | nindent 4 }}
+  annotations:
+    {{- toYaml $allowed | nindent 4 }}
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          - path: {{ $base | quote }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "preview-api.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}
 {{- end }}
