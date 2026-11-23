@@ -26,7 +26,11 @@ spec:
         path: charts/preview-api
         helm:
           releaseName: 'preview-pr-{{ .prNumber }}'
+          valueFiles:
+            - values-eks.yaml
           parameters:
+            - name: basePath
+              value: /container-2/pr-{{ .prNumber }}
             - name: preview.prNumber
               value: '{{ .prNumber }}'
               forceString: true
@@ -41,9 +45,9 @@ spec:
             - name: imagePullSecrets[0].name
               value: ghcr-pull
       destination:
+        # Argo CD가 설치된 EKS 자체를 배포 대상으로 사용합니다.
         server: https://kubernetes.default.svc
-        # 적용 전에 운영진이 할당한 팀 네임스페이스로 변경하세요.
-        namespace: replace-with-team-namespace
+        namespace: container-2
       syncPolicy:
         automated:
           prune: true

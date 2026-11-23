@@ -2,38 +2,26 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
-trap 'rm -f "$tmp/appset.yaml" "$tmp/values.yaml"; rmdir "$tmp"' EXIT
-EKS_SERVER=https://test.example.invalid ALB_GROUP=shared-test bash argocd/render-eks.sh > "$tmp/appset.yaml"
-yq -e '.spec.template.spec.destination.namespace == "container-2" and .spec.template.spec.destination.server == "https://test.example.invalid"' "$tmp/appset.yaml" > /dev/null
-yq '.spec.template.spec.source.helm.valuesObject' "$tmp/appset.yaml" > "$tmp/values.yaml"
+trap 'rm -rf "$tmp"' EXIT
+EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh > "$tmp/appset.yaml"
+yq -e '.spec.template.spec.destination.namespace == "container-2" and .spec.template.spec.destination.server == "https://test.example.invalid" and .spec.template.spec.source.helm.valueFiles[0] == "values-eks.yaml"' "$tmp/appset.yaml" > /dev/null
 for pr in 17 18; do
-  helm template "preview-pr-$pr" charts/preview-api -n container-2 -f "$tmp/values.yaml" \
-    --set-string "preview.prNumber=$pr" --set-string "preview.commitSha=$(printf '%040d' 1)" \
-    --set-string "image.digest=sha256:$(printf '%064d' 1)" |
-    yq -o=json -I=0 '.' - | PR_NUMBER=$pr node -e '
-      const assert = require("node:assert/strict");
-      const docs = require("node:fs").readFileSync(0, "utf8").trim().split(/\r?\n/).map(JSON.parse);
-      const ingresses = docs.filter(d => d.kind === "Ingress");
-      assert.equal(ingresses.length, 1);
-      const ingress = ingresses[0], pr = process.env.PR_NUMBER;
-      const path = "/container-2/pr-" + pr;
-      const service = docs.find(d => d.kind === "Service");
-      assert.equal(service.metadata.name, "preview-pr-" + pr + "-preview-api");
-      assert.equal(ingress.metadata.name, service.metadata.name);
-      const rule = ingress.spec.rules[0].http.paths[0];
-      assert.equal(rule.backend.service.name, service.metadata.name);
-      assert.equal(rule.backend.service.port.number, service.spec.ports[0].port);
-      assert.equal(rule.path, path);
-      assert.equal(rule.pathType, "Prefix");
-      const a = ingress.metadata.annotations;
-      assert.equal(a["alb.ingress.kubernetes.io/group.name"], "shared-test");
-      assert.equal(a["alb.ingress.kubernetes.io/healthcheck-path"], "/health");
-      const [transform] = JSON.parse(a["alb.ingress.kubernetes.io/transforms." + service.metadata.name]);
-      const [rewrite] = transform.urlRewriteConfig.rewrites;
-      const regex = new RegExp(rewrite.regex);
-      assert.equal((path + "/version").replace(regex, rewrite.replace), "/version");
-      assert.equal(path.replace(regex, rewrite.replace), "/");
-      assert.equal(regex.test(path + "0/version"), false);
-    '
+  helm template "preview-pr-$pr" charts/preview-api -n container-2 -f charts/preview-api/values-eks.yaml \
+    --set-string "basePath=/container-2/pr-$pr" --set-string "preview.prNumber=$pr" \
+    --set-string "preview.commitSha=$(printf '%040d' 1)" --set-string "image.digest=sha256:$(printf '%064d' 1)" |
+    ruby -r yaml -e '
+      docs = YAML.load_stream(STDIN.read).compact
+      pr = ARGV.fetch(0); base = "/container-2/pr-#{pr}"
+      ingress = docs.find { |d| d["kind"] == "Ingress" }; service = docs.find { |d| d["kind"] == "Service" }
+      deployment = docs.find { |d| d["kind"] == "Deployment" }; container = deployment.dig("spec", "template", "spec", "containers", 0)
+      raise "service mismatch" unless ingress.dig("spec", "rules", 0, "http", "paths", 0, "backend", "service", "name") == service.dig("metadata", "name")
+      raise "path mismatch" unless ingress.dig("spec", "rules", 0, "http", "paths", 0, "path") == base
+      a = ingress.dig("metadata", "annotations")
+      raise "wrong ALB group" unless a["alb.ingress.kubernetes.io/group.name"] == "sbg-demo"
+      raise "wrong health" unless a["alb.ingress.kubernetes.io/healthcheck-path"] == "#{base}/health"
+      raise "unexpected annotation" unless a.keys.sort == %w[alb.ingress.kubernetes.io/group.name alb.ingress.kubernetes.io/healthcheck-path alb.ingress.kubernetes.io/scheme alb.ingress.kubernetes.io/target-type].sort
+      raise "wrong base" unless container["env"].any? { |e| e["name"] == "BASE_PATH" && e["value"] == base }
+      %w[startupProbe readinessProbe livenessProbe].each { |p| raise "wrong probe" unless container.dig(p,"httpGet","path") == "#{base}/health" }
+    ' "$pr"
 done
 echo 'PR 17 and 18 Ingress routes passed'

@@ -1,0 +1,3 @@
+deploymentMode: main
+replicaCount: 2
+basePath: /container-2/main
