@@ -13,6 +13,18 @@ curl http://localhost:8080/environment
 docker compose down
 ```
 
+## EKS API 호출기
+
+로컬 브라우저에서 main 또는 PR 배포의 `/health`, `/environment`, `/version` 응답을 확인할 수 있습니다. Python 3만 있으면 실행되며, EKS 고정 주소는 `/container-2`까지 입력합니다.
+
+```sh
+python3 tools/api-caller/server.py
+```
+
+브라우저에서 `http://127.0.0.1:8765`를 열고 main 체크박스 또는 PR 번호를 선택한 뒤 API 버튼을 누릅니다. 서버를 종료하려면 터미널에서 `Ctrl+C`를 누릅니다.
+
+`PR 목록 및 이미지 새로고침`을 누르면 열려 있는 PR과 각 PR의 최신 커밋에 해당하는 GHCR 이미지 태그를 조회합니다. 목록에서 PR을 선택하면 번호가 입력됩니다. 조회에는 [GitHub CLI](https://cli.github.com/) 설치 및 `gh auth login`이 필요하며, 비공개 저장소와 패키지에는 각각 읽기 권한이 필요합니다. 이미지 존재는 EKS 배포 완료를 의미하지 않으며, 서명이나 이미지 신뢰성 검증도 수행하지 않습니다. 최신 이미지를 확인하지 못해도 PR 번호를 직접 입력해 API를 호출할 수 있습니다.
+
 ## CI와 이미지 발행
 
 | 대상 | 검사 및 결과 |
