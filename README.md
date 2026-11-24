@@ -79,10 +79,11 @@ helm upgrade --install preview-pr-12 charts/preview-api \
   --set-string preview.prNumber=12 \
   --set-string preview.commitSha="$HEAD_SHA" \
   --set-string image.digest="$IMAGE_DIGEST" \
+  --set-string basePath="$TEAM_PATH" \
   --set-string ingress.path="$TEAM_PATH" \
   --set-string 'ingress.annotations.alb\.ingress\.kubernetes\.io/group\.name'="$ALB_GROUP"
 ```
 
 `TEAM_NAMESPACE`, `TEAM_PATH`, `ALB_GROUP`은 운영진이 안내한 값으로 설정합니다. `IMAGE_DIGEST`에는 위 `resolve` 결과에서 이미지 이름 뒤의 `sha256:…` 부분을 전달합니다. digest를 지정하면 태그보다 우선하며, 형식 검사만으로 이미지의 신뢰성을 보장할 수 없으므로 PR 배포에는 `resolve`로 검증한 digest를 사용합니다. 로컬에서는 `values-local.yaml`의 버전 태그를 사용할 수 있습니다. 차트는 Deployment, ClusterIP Service와 활성화된 경우 Ingress를 생성하며 네임스페이스는 만들지 않습니다.
 
-Ingress의 경로는 요청을 그대로 전달합니다. `/health` 등 애플리케이션의 루트 경로를 사용하는 API가 팀별 접두 경로에서도 동작하려면 Ingress 컨트롤러의 경로 변환 또는 애플리케이션 설정을 별도로 확인해야 합니다. 로컬 Ingress를 사용하려면 minikube의 nginx ingress 애드온이 필요합니다. 리소스 기본값은 컨테이너당 CPU 50m/200m, 메모리 128Mi/256Mi(request/limit)이며 네임스페이스의 전체 할당량을 다른 배포와 함께 고려해야 합니다.
+PR 12 예제는 TEAM_NAMESPACE=container-2, TEAM_PATH=/container-2/pr-12, ALB_GROUP=sbg-demo를 사용합니다. ALB가 전달하는 접두 경로를 Spring의 BASE_PATH와 Pod probe가 함께 사용합니다. EKS values의 Pod당 requests는 50m/128Mi, limits는 200m/320Mi입니다. 로컬 기본 메모리 limit는 256Mi입니다.

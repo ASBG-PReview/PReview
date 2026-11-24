@@ -41,3 +41,10 @@ if bash "$writer" publish "$work/rebuilt" "$target" "$a"; then exit 1; fi
 skopeo inspect --raw "docker://$target" > "$work/remote.json"
 test "$(skopeo manifest-digest "$work/remote.json")" = "$a"
 printf 'First and recovered digest %s\nRebuilt digest %s\n' "$a" "$b"
+
+main_target="${target%:*}:sha-${GITHUB_SHA:-local-test}"
+test "$(bash "$writer" publish-main "$work/first" "$main_target" "$a")" = "$a"
+test "$(bash "$writer" publish-main "$work/first" "$main_target" "$a")" = "$a"
+if bash "$writer" publish-main "$work/rebuilt" "$main_target" "$b"; then exit 1; fi
+skopeo inspect --raw "docker://$main_target" > "$work/main.json"
+test "$(skopeo manifest-digest "$work/main.json")" = "$a"

@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   tests:
@@ -141,19 +141,18 @@ jobs:
           GH_USER: ${{ github.actor }}
           REPOSITORY: ${{ github.repository }}
           SHA: ${{ github.sha }}
+          MAIN_DEPLOY_RESUME_FROM: ${{ vars.MAIN_DEPLOY_RESUME_FROM }}
         run: |
           IMAGE="ghcr.io/${REPOSITORY,,}:sha-$SHA"
-          docker load -i "$RUNNER_TEMP/preview-artifact/preview-image.tar"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
-          docker tag preview-ci:build "$IMAGE"
-          docker push "$IMAGE"
-          # Inspect the immutable registry digest and confirm the published platform.
-          digest=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')
-          digest=${digest##*@}
-          docker pull "${IMAGE%:*}@$digest"
-          test "$(docker image inspect "${IMAGE%:*}@$digest" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
+          archive="$RUNNER_TEMP/preview-artifact/preview-image.tar"
+          authfile="$RUNNER_TEMP/main-ghcr-auth.json"
+          trap 'rm -f "$authfile"' EXIT
+          export REGISTRY_AUTH_FILE="$authfile"
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$authfile" -u "$GH_USER" --password-stdin ghcr.io
+          prepared="$RUNNER_TEMP/main-image"
+          digest=$(bash scripts/publish_preview_image.sh prepare "docker-archive:$archive" "$prepared")
+          platform=$(skopeo inspect --config "dir:$prepared" | jq -er '.os + "/" + .architecture')
+          test "$platform" = linux/amd64
+          digest=$(bash scripts/publish_preview_image.sh publish-main "$prepared" "$IMAGE" "$digest")
           IMAGE_DIGEST="$digest" node scripts/promote-main.mjs
           echo "Published: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
-      - name: Clear registry credentials
-        if: always()
-        run: docker logout ghcr.io

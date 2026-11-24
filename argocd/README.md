@@ -1,11 +1,13 @@
 # ApplicationSet 설정
 
-## Minikube의 Argo CD에서 팀 EKS에 배포
+## EKS 내부 Argo CD 배포
 
-Argo CD는 로컬 minikube에서 실행하고, 등록된 EKS를 배포 대상으로 사용합니다. 이 차트가 main에 반영되고 PR 이미지가 BASE_PATH를 지원하는지 확인한 뒤 기존 관리자와 전환 순서를 협의하세요. ApplicationSet YAML은 실제 EKS 주소를 인자로 받아 검토용으로 생성합니다.
+팀 운영 구성에서는 EKS 내부의 Argo CD가 같은 클러스터의 `container-2`에 배포합니다. `argocd/main-application.yaml`과 `argocd/applicationset.yaml`의 기본 목적지는 모두 `https://kubernetes.default.svc`입니다.
+
+별도 클러스터에서 Argo CD를 운영하는 경우에만, 등록된 EKS 주소로 두 매니페스트를 함께 렌더링합니다.
 
 ```bash
-EKS_SERVER='https://등록된-EKS-서버' bash argocd/render-eks.sh > applicationset-eks.yaml
+EKS_SERVER='https://등록된-EKS-서버' bash argocd/render-eks.sh both > preview-eks.yaml
 ```
 
 각 PR의 경로와 health check는 `/container-2/pr-<번호>` 및 `/container-2/pr-<번호>/health`입니다. ALB는 경로를 그대로 전달하며 앱의 BASE_PATH, probe와 일치해야 합니다. 같은 `sbg-demo` ALB 그룹을 사용합니다.
@@ -14,13 +16,13 @@ EKS_SERVER='https://등록된-EKS-서버' bash argocd/render-eks.sh > applicatio
 
 ## 적용 전 준비
 
-1. 이 차트와 ApplicationSet 변경을 검토해 `main`에 반영합니다. ApplicationSet은 로컬 파일이 아니라 GitHub의 `main` 차트를 사용합니다.
+1. 이 차트와 ApplicationSet 변경을 검토해 `main`에 반영합니다. ApplicationSet은 로컬 파일이 아니라 GitHub의 고정 커밋 차트를 사용합니다.
 2. `preview-state` 브랜치에 신뢰된 자동화만 쓰도록 권한을 설정합니다. 이 브랜치에 쓰기 권한이 있는 사용자는 배포 이미지를 바꿀 수 있으므로 보호가 필수입니다. 저장소가 비공개라면 Argo CD에 Git 읽기 인증을 설정합니다.
-3. 로컬 minikube에 Argo CD와 ApplicationSet 컨트롤러를 준비하고, EKS 접속 정보와 `container-2` 관리 권한을 등록합니다. 운영진 권한 제한으로 EKS 내부 Argo CD 설치를 가정하지 않습니다.
+3. 운영진과 EKS 내부 Argo CD 및 ApplicationSet 컨트롤러의 설치 상태를 확인하고 컨트롤러에 `container-2` 관리 권한을 부여합니다.
 4. EKS의 `container-2`에 `ghcr-pull` Secret이 있는지, AppProject와 컨트롤러에 필요한 배포·정리 권한이 있는지 확인합니다. 토큰 값은 저장소에 기록하지 않습니다.
 5. 기존 배포를 관리하는 Argo CD를 확인하고 다른 컨트롤러가 동시에 관리하지 않도록 전환 순서를 협의합니다. PR 수, 기존 이미지의 BASE_PATH 지원 및 실제 quota도 확인합니다.
 
-준비 후 렌더링 결과와 대상 클러스터를 검토한 다음 담당자가 minikube에 적용합니다. main Application도 로컬 Argo CD에 맞는 EKS destination으로 별도 준비해야 합니다.
+준비 후 담당자가 EKS 컨텍스트를 확인하고 두 원본 매니페스트를 EKS의 `argocd` 네임스페이스에 적용합니다.
 
 상태 파일 변경은 Git generator가 주기적으로 조회합니다. 기본 설정은 60초지만 repo-server 캐시 등으로 더 늦게 반영될 수 있습니다. Application 삭제 시 `preserveResourcesOnDeletion: false`를 통해 해당 Application의 리소스가 삭제됩니다. 팀 Namespace와 별도로 만든 `ghcr-pull` Secret은 유지합니다. 실제 리소스 회수와 다른 PR 보존은 클러스터에서 검증합니다.
 
@@ -45,7 +47,7 @@ main은 `argocd/main-application.yaml`의 `preview-main` Application으로 관�
 발행 digest와 플랫폼을 확인한 뒤 `scripts/promote-main.mjs`가 `main-deploy` 브랜치를 갱신합니다.
 이 브랜치의 트리는 테스트한 main 커밋의 전체 소스에 `charts/preview-api/values-main-image.json`을 추가한 것입니다.
 따라서 main Application은 최신 main 차트를 무조건 가져오는 대신 **발행 이미지와 함께 검증한 차트**를 읽습니다.
-PR ApplicationSet은 기존대로 `main` 차트와 `preview-state`의 digest를 사용합니다.
+PR ApplicationSet은 검토한 main 커밋의 고정 차트와 `preview-state`의 digest를 사용합니다.
 `main-deploy`와 `preview-state`에는 신뢰된 자동화와 승인된 복구 담당자만 쓸 수 있도록 저장소 규칙을 설정합니다.
 main 발행 job에는 이 상태 기록을 위해 `contents: write`가 필요합니다.
 
@@ -71,8 +73,8 @@ BASE_PATH가 없으면 기존 루트 `/health`, `/environment`, `/version`이 �
 
 1. 이 변경을 리뷰 후 main에 병합하고 CI의 이미지 발행·`main-deploy` 기록 성공을 확인합니다. 로컬 복사본 수정만으로 원격 차트는 바뀌지 않습니다.
 2. 기존 PR 17·18 이미지는 BASE_PATH 지원이 없을 수 있습니다. 새 코드로 재빌드·검증된 PR digest가 상태에 기록되기 전에 경로가 바뀐 차트를 동기화하지 마세요. 기존 PR 컨트롤러의 자동 동기화를 먼저 중지하고 차트 변경과 새 PR 이미지를 함께 전환합니다.
-3. 기존 Argo CD 관리 주체를 확인하고 선택한 로컬 Argo CD로 관리권을 이관합니다. 기존 컨트롤러의 동기화·삭제를 중지한 뒤 새 컨트롤러가 리소스를 인계하도록 운영진과 전환합니다. Application을 finalizer가 있는 상태로 삭제해 리소스를 정리하지 마세요. EKS controller ServiceAccount와 AppProject가 container-2의 필요한 리소스를 관리할 수 있어야 합니다. 상세 권한과 최신 점검은 아래에 기록했습니다.
-4. 현재 PR 수·quota·Secret 및 공용 ALB 정책을 다시 확인한 뒤 로컬 minikube의 `argocd`에 EKS를 대상으로 하는 main Application과 PR ApplicationSet을 적용합니다. `ghcr-pull`은 유지합니다. 이전 점검에서는 익명 GHCR 조회가 unauthorized였으므로 패키지 공개가 확인되기 전에는 Secret을 제거하지 않습니다.
+3. 기존 Argo CD 관리 주체를 확인하고 필요하면 운영진과 EKS 내부 Argo CD로 관리권을 이관합니다. 기존 컨트롤러의 동기화·삭제를 중지한 뒤 새 컨트롤러가 리소스를 인계하도록 운영진과 전환합니다. Application을 finalizer가 있는 상태로 삭제해 리소스를 정리하지 마세요. EKS controller ServiceAccount와 AppProject가 container-2의 필요한 리소스를 관리할 수 있어야 합니다. 상세 권한과 최신 점검은 아래에 기록했습니다.
+4. 현재 PR 수·quota·Secret 및 공용 ALB 정책을 다시 확인한 뒤 EKS의 `argocd`에 main Application과 PR ApplicationSet을 적용합니다. `ghcr-pull`은 유지합니다. 이전 점검에서는 익명 GHCR 조회가 unauthorized였으므로 패키지 공개가 확인되기 전에는 Secret을 제거하지 않습니다.
 5. main Pod Ready, ALB target health와 `/container-2/main/health`, `/environment`, `/version`을 검증합니다. Pod의 spec 이미지 digest와 상태 파일, `/environment`의 SHA, `/version`의 앱 버전을 각각 대조합니다.
 6. PR 두 개의 새 커밋·빌드 실패·종료를 시험하고 main·나머지 PR·Namespace·Secret이 유지되는지 확인합니다. PR 종료는 Deployment·Service·Ingress만 해당 Application과 함께 정리해야 합니다.
 
@@ -82,8 +84,18 @@ BASE_PATH가 없으면 기존 루트 `/health`, `/environment`, `/version`이 �
 복구 담당자는 신규 배포를 중지하고 `main-deploy`의 마지막 정상 **트리**를 복원하는 새 커밋을 기록해 Argo CD가 이전 차트·digest를 동기화하게 합니다.
 자동 동기화 중 `kubectl rollout undo`만 하면 Git 상태에 의해 다시 덮어써질 수 있습니다.
 첫 배포에 이전 정상 버전이 없다면 수정된 main을 재검증·발행해야 합니다.
-로컬 minikube가 중지되면 기존 EKS 앱 Pod는 유지되지만 Argo CD의 동기화·PR 정리는 중단됩니다.
+Argo CD 컨트롤러가 중지되면 기존 EKS 앱 Pod는 유지되지만 Argo CD의 동기화·PR 정리는 중단됩니다.
 
 ## 운영 권한
 
-Argo CD가 실행되는 로컬 minikube에서 EKS에 연결할 수 있어야 하며, 등록한 EKS 자격증명은 `container-2`의 Deployment·Service·Ingress 관리와 필요한 상태 조회 권한을 가져야 합니다. 기존 관리 주체와 finalizer를 확인하고 관리권을 넘겨받으세요. 실제 권한과 ALB 정책은 운영진과 검증합니다.
+EKS 내부의 Argo CD 컨트롤러 서비스 계정은 `container-2`의 Deployment·Service·Ingress 관리와 필요한 상태 조회 권한을 가져야 합니다. 기존 관리 주체와 finalizer를 확인하고 관리권을 넘겨받으세요. 실제 권한과 ALB 정책은 운영진과 검증합니다.
+
+### 승격 재시도와 차트 업그레이드
+
+main-deploy 트리가 요청한 배포와 같으면 새 배포 커밋을 만들지 않습니다. 동일한 소스 SHA에 서로 다른 배포 트리가 생기면 자동 승격을 중단합니다. 수동 복구는 이전 정상 트리를 담은 **새 커밋**으로 수행하고 커밋 메시지에는 자동 발행 전용 형식인 `Deploy main <전체 SHA>`를 사용하지 않습니다. 복구 커밋이 브랜치 끝에 있는 동안 변경된 트리의 자동 승격은 중단됩니다. 재개하려면 담당자가 배포 대상을 확인한 뒤 preview-publish 환경 변수(GitHub Actions variable) `MAIN_DEPLOY_RESUME_FROM`에 현재 main-deploy의 전체 커밋 SHA를 지정하고 검증된 발행 작업을 실행합니다. 재개 후 변수를 지웁니다. 커밋 메시지 구분은 쓰기 권한 통제를 대체하지 않습니다.
+
+main과 main-deploy에는 단일 원자적 갱신이 없으므로 승격 직후 main을 다시 읽습니다. main이 앞서가면 작업 로그에 실제 발행 SHA와 새 main SHA를 남기고 실패 처리합니다. 이 경우 새 main에 대한 CI·승격 결과를 확인합니다.
+
+PR ApplicationSet은 감사에서 접두 경로가 검증된 팀 커밋 55d093d의 차트를 사용합니다. 기존 3필드 상태는 이 커밋으로 렌더링합니다. 새 이미지가 배정되면 상태에 `chartRevision`과 digest를 함께 기록합니다. 차트 업그레이드 시에는 새 main 커밋의 세 API와 probe를 검증한 뒤 ApplicationSet의 허용 목록부터 확장하고 상태 작성자의 기본 revision을 갱신합니다. 이전 revision은 참조하는 상태가 있는 동안 허용합니다. 복구 시 검증된 이전 revision과 digest를 함께 복원합니다. 접두 경로를 지원하지 않는 구형 이미지는 호환 이미지로 교체한 뒤 전환합니다.
+
+main의 검사 전용 수동 실행과 push 실행은 별도의 concurrency 그룹을 사용합니다. SHA 태그에 이미 테스트 산출물과 다른 digest가 있으면 발행을 중단합니다. 같은 바이트로 발행을 재시도하거나 새 main 커밋을 검증해 발행하세요.

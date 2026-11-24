@@ -9,7 +9,7 @@ case "${1:-}" in
     skopeo manifest-digest "$3/manifest.json"
     exit
     ;;
-  publish)
+  publish|publish-main)
     test "$#" = 4
     ;;
   *)
@@ -29,6 +29,10 @@ trap 'rm -rf -- "$work"' EXIT
 if skopeo inspect --raw "$target" > "$work/remote" 2> "$work/error"; then
   existing=$(skopeo manifest-digest "$work/remote")
   if [[ "$existing" != "$digest" ]]; then
+    if [[ "$1" == publish-main ]]; then
+      echo "Main SHA tag already points to a different digest; refusing to overwrite it" >&2
+      exit 1
+    fi
     # A fresh Gradle/Docker build of the same commit may have different bytes.
     # Keep the first image only if this publisher previously signed that exact digest.
     PREVIEW_DIGEST="$existing" node scripts/preview-publish.mjs verify-intent

@@ -5,6 +5,27 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh > "$tmp/appset.yaml"
 yq -e '.spec.template.spec.destination.namespace == "container-2" and .spec.template.spec.destination.server == "https://test.example.invalid" and .spec.template.spec.source.helm.valueFiles[0] == "values-eks.yaml"' "$tmp/appset.yaml" > /dev/null
+EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh both > "$tmp/both.yaml"
+ruby -ryaml -e '
+  set, main = YAML.load_stream(File.read(ARGV.fetch(0)))
+  target = {"server"=>"https://test.example.invalid", "namespace"=>"container-2"}
+  abort unless set.dig("spec","template","spec","destination") == target && main.dig("spec","destination") == target
+' "$tmp/both.yaml"
+# Render the ApplicationSet's actual Go template against legacy and new state.
+chart="$tmp/revision-check"
+mkdir -p "$chart/templates"
+printf 'apiVersion: v2\nname: revision-check\nversion: 1.0.0\n' > "$chart/Chart.yaml"
+revision_template=$(yq -r '.spec.template.spec.source.targetRevision' "$tmp/appset.yaml")
+printf 'apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: revision-check\ndata:\n  revision: "{{ with .Values.state }}%s{{ end }}"\n' "$revision_template" > "$chart/templates/check.yaml"
+baseline=55d093d0e6cd705e216de4efd2b4a216e7330644
+for input in "state.prNumber=17" "state.chartRevision=$baseline"; do
+  resolved=$(helm template check "$chart" --set-string "$input" | yq -r '.data.revision')
+  test "$resolved" = "$baseline"
+done
+if helm template check "$chart" --set-string state.chartRevision=unreviewed >/dev/null 2>&1; then
+  echo 'ApplicationSet accepted an unreviewed chart revision' >&2
+  exit 1
+fi
 for pr in 17 18; do
   helm template "preview-pr-$pr" charts/preview-api -n container-2 -f charts/preview-api/values-eks.yaml \
     --set-string "basePath=/container-2/pr-$pr" --set-string "preview.prNumber=$pr" \

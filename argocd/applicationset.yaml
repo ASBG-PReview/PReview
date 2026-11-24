@@ -22,7 +22,8 @@ spec:
       project: default
       source:
         repoURL: https://github.com/ASBG-PReview/PReview.git
-        targetRevision: main
+        # A state without chartRevision keeps the original reviewed baseline.
+        targetRevision: '{{ if hasKey . "chartRevision" }}{{ if ne .chartRevision "55d093d0e6cd705e216de4efd2b4a216e7330644" }}{{ fail "unapproved chartRevision" }}{{ end }}{{ .chartRevision }}{{ else }}55d093d0e6cd705e216de4efd2b4a216e7330644{{ end }}'
         path: charts/preview-api
         helm:
           releaseName: 'preview-pr-{{ .prNumber }}'

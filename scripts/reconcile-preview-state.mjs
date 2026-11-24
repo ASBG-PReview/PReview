@@ -4,6 +4,8 @@ import { Publisher, currentPR } from './preview-publish.mjs';
 
 const branch = 'preview-state';
 const maxPreviews = 2;
+// This reviewed main commit is also approved by the ApplicationSet.
+const chartRevision = '55d093d0e6cd705e216de4efd2b4a216e7330644';
 const pathFor = number => `previews/pr-${number}/state.json`;
 const statePath = /^previews\/pr-([1-9][0-9]*)\/state\.json$/;
 const fullSha = /^[0-9a-f]{40}$/;
@@ -110,9 +112,10 @@ export function reconcile(publisher, log = console.log) {
     }
     const prefix = `ghcr.io/${repo.full_name.toLowerCase()}@`;
     if (!image.startsWith(prefix) || !digestPattern.test(image.slice(prefix.length))) throw new Error('Unexpected verified image');
-    const next = { prNumber: String(number), commitSha: sha, imageDigest: image.slice(prefix.length) };
+    const next = { prNumber: String(number), commitSha: sha, imageDigest: image.slice(prefix.length), chartRevision };
     live = publisher.api(`/pulls/${number}`);
     if (!isEligible(live, repo) || live.head.sha !== sha) continue;
+    // Keep the existing chart paired with an unchanged verified image.
     if (sameState(previous, next)) continue;
     const body = { message: `Update preview state for PR #${number}`, branch,
       content: Buffer.from(JSON.stringify(next, null, 2) + '\n').toString('base64') };

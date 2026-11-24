@@ -49,4 +49,22 @@ reject --set-string 'ingress.annotations.alb\.ingress\.kubernetes\.io/load-balan
 if helm template preview-pr-17 charts/preview-api --set-string preview.prNumber=main --set-string "preview.commitSha=$sha" --set-string "image.digest=$digest" >/dev/null 2>&1; then
  echo 'PR validation weakened' >&2; exit 1
 fi
-echo 'Main and PR shared ALB checks passed'
+# Render the documented command with the same arguments, without contacting EKS.
+HEAD_SHA="$sha" IMAGE_DIGEST="$digest" TEAM_NAMESPACE=container-2 TEAM_PATH=/container-2/pr-12 ALB_GROUP=sbg-demo \
+  ruby -rshellwords -ryaml -e '
+    example = File.read("README.md")[/^helm upgrade --install preview-pr-12 .*?(?=^```)/m] or abort "missing README example"
+    args = Shellwords.split(example.gsub(/\\\n/, " "))
+    args.shift(3)
+    args.map! { |arg| arg.gsub(/\$(\w+)/) { ENV.fetch($1) } }
+    output = IO.popen(["helm", "template", *args], &:read)
+    abort "README helm example failed" unless $?.success?
+    objects = YAML.load_stream(output).compact
+    pod = objects.find { |d| d["kind"] == "Deployment" }.fetch("spec").fetch("template")
+    service = objects.find { |d| d["kind"] == "Service" }
+    abort "README selector" unless service.dig("spec","selector").all? { |k,v| pod.dig("metadata","labels",k) == v }
+    container = pod.dig("spec","containers",0)
+    base = ENV.fetch("TEAM_PATH")
+    abort "README base path" unless container["env"].include?({"name"=>"BASE_PATH","value"=>base})
+    %w[startupProbe readinessProbe livenessProbe].each { |k| abort "README probe" unless container.dig(k,"httpGet","path") == base + "/health" }
+  '
+echo 'Main, PR and README Helm checks passed'

@@ -55,7 +55,8 @@ test('writes separate verified state for two PRs', () => {
   const p = fake({ open: [pr(17), pr(18)] });
   assert.equal(reconcile(p, quiet), 0);
   assert.deepEqual(p.writes.map(x => x.path), ['/contents/previews/pr-17/state.json', '/contents/previews/pr-18/state.json']);
-  assert.deepEqual(payload(p.writes[0]), { prNumber: '17', commitSha: sha, imageDigest: digest });
+  assert.deepEqual(payload(p.writes[0]), { prNumber: '17', commitSha: sha, imageDigest: digest,
+    chartRevision: '55d093d0e6cd705e216de4efd2b4a216e7330644' });
 });
 test('admits at most two previews and keeps later PRs waiting', () => {
   const p = fake({ open: [pr(19), pr(17), pr(18)] });
