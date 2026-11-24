@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cleanup, Registry } from '../scripts/cleanup-preview-images.mjs';
+import { cleanup, mainImageRoots, Registry } from '../scripts/cleanup-preview-images.mjs';
 
 const sha = 'a'.repeat(40);
 const digest = id => 'sha256:' + id.toString(16).padStart(64, '0');
@@ -131,4 +131,94 @@ test('package API adapter reads all pages before deleting an old version on page
   assert.deepEqual(requests.filter(args => args.includes('DELETE')), [
     ['api', 'orgs/asbg-preview/packages/container/preview/versions/101', '--method', 'DELETE'],
   ]);
+});
+
+test('an untagged nested index protects its PR child while an independent orphan is collected', () => {
+  const f = fixture([version(1), version(2), version(3, tag(23)), version(4, tag(23))]);
+  const children = new Map([[digest(1), digest(2)], [digest(2), digest(3)]]);
+  const single = f.registry.manifest;
+  f.registry.manifest = d => children.has(d) ? { schemaVersion: 2, manifests: [{ digest: children.get(d) }] } : single();
+  assert.equal(f.run(), false);
+  assert.deepEqual(f.removed, [4]);
+});
+
+test('a candidate parent is removed before its candidate child, including after interruption', () => {
+  const f = fixture([version(1, tag(23)), version(2, tag(23))]);
+  const single = f.registry.manifest;
+  f.registry.manifest = d => d === digest(2) ? { schemaVersion: 2, manifests: [{ digest: digest(1) }] } : single();
+  const remove = f.registry.remove;
+  f.registry.remove = id => { if (id === 1) throw Error('pause'); remove(id); };
+  assert.throws(() => f.run(), /pause/);
+  assert.deepEqual(f.removed, [2]);
+  f.registry.remove = remove;
+  assert.equal(f.run(), true);
+  assert.deepEqual(f.removed, [2, 1]);
+});
+
+test('a different parent gaining a retained tag invalidates the complete deletion plan', () => {
+  const f = fixture([version(1, tag(23)), version(2, tag(23))]);
+  const versions = f.registry.versions;
+  let calls = 0;
+  f.registry.versions = () => ++calls === 1 ? versions() : [version(1, tag(23)), version(2, tag(23), 'keep')];
+  assert.equal(f.run(), false);
+  assert.deepEqual(f.removed, []);
+});
+
+test('changed Git roots or a new closure epoch stop collection, including empty completions', () => {
+  const first = '2026-10-01T00:00:00Z', second = '2026-10-15T00:00:00Z';
+  for (const versions of [[], [version(1, tag(23))]]) {
+    const f = fixture(versions);
+    let checks = 0;
+    f.publisher.api = () => ({ state: 'closed', number: 23, closed_at: ++checks === 1 ? first : second });
+    const options = { apply: true, deploymentRoots: () => [], expectedClose: first, log() {} };
+    assert.equal(cleanup(f.publisher, f.registry, 23, options), false);
+    assert.deepEqual(f.removed, []);
+    checks = 0;
+    assert.throws(() => cleanup(f.publisher, f.registry, 23, { ...options, assertCurrent() { throw Error('changed ref'); } }), /changed ref/);
+    assert.deepEqual(f.removed, []);
+  }
+});
+
+test('the pinned main deployment and previous distinct digest are protected across consecutive equal values', () => {
+  const prev = 'b'.repeat(40), oldest = 'c'.repeat(40);
+  const repo = 'Team/Example';
+  const values = digestValue => ({ encoding: 'base64', content: Buffer.from(JSON.stringify({
+    image: { repository: 'ghcr.io/team/example', digest: digestValue },
+  })).toString('base64') });
+  const publisher = { api(path) {
+    if (path.startsWith('/commits?')) return [sha, prev, oldest].map(sha => ({ sha }));
+    assert.ok(path.startsWith('/contents/charts/preview-api/values-main-image.json?ref='));
+    return values(path.endsWith(oldest) ? digest(2) : digest(1));
+  } };
+  assert.deepEqual([...mainImageRoots(publisher, sha, repo)], [digest(1), digest(2)]);
+  assert.throws(() => mainImageRoots(publisher, sha, 'other/team'), /Invalid main deployment image/);
+  assert.throws(() => mainImageRoots(publisher, [sha], repo), /Invalid main deployment revision/);
+  assert.throws(() => mainImageRoots({ api(path) {
+    return path.startsWith('/commits?') ? [{ sha: [prev] }] : values(digest(1));
+  } }, sha, repo), /Invalid main history SHA/);
+});
+
+test('array-typed digests and cyclic indexes block every deletion', () => {
+  for (const corrupt of [
+    f => { f.registry.versions = () => [{ ...version(1, tag(23)), name: [digest(1)] }]; },
+    f => { f.registry.manifest = () => ({ schemaVersion: 2, manifests: [{ digest: [digest(1)] }] }); },
+    f => { f.registry.manifest = () => ({ schemaVersion: 2, manifests: [{ digest: digest(1) }] }); },
+  ]) {
+    const f = fixture([version(1, tag(23))]);
+    corrupt(f);
+    assert.throws(() => f.run());
+    assert.deepEqual(f.removed, []);
+  }
+});
+
+test('a retained OCI artifact protects its subject, and an incomplete subject prevents deletion', () => {
+  const f = fixture([version(1, tag(23)), version(2, 'retained-artifact'), version(3, tag(23))]);
+  const image = f.registry.manifest;
+  let subject = { digest: digest(1) };
+  f.registry.manifest = d => d === digest(2) ? { ...image(), subject } : image();
+  assert.equal(f.run(), false);
+  assert.deepEqual(f.removed, [3]);
+  subject = {};
+  assert.throws(() => f.run(), /Invalid manifest graph/);
+  assert.deepEqual(f.removed, [3]);
 });

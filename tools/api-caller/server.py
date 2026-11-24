@@ -2,6 +2,7 @@
 """Serve the local PReview API caller and proxy requests to the configured EKS ALB."""
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request, urlopen
@@ -17,6 +18,7 @@ from urllib.parse import urlencode
 HOST = "127.0.0.1"
 PORT = 8765
 ENDPOINTS = {"health", "environment", "version"}
+MAX_RESPONSE = 1_000_000
 HTML = r'''<!doctype html>
 <html lang="ko">
 <head>
@@ -102,7 +104,7 @@ HTML = r'''<!doctype html>
         </label>
         <label class="mode"><input id="isMain" type="checkbox"> main 배포 조회 <small>선택 시 PR 번호 무시</small></label>
         <label class="field" for="prNumber">PR 번호
-          <input id="prNumber" type="number" min="1" step="1" value="29" placeholder="예: 29">
+          <input id="prNumber" type="number" min="1" step="1" placeholder="열린 PR 번호">
           <span class="hint">목록에서 선택하거나 직접 입력할 수 있습니다.</span>
         </label>
         <div class="preview" id="pathPreview"></div>
@@ -141,12 +143,13 @@ HTML = r'''<!doctype html>
   const imageStatus = document.querySelector('#imageStatus');
   const resultTarget = document.querySelector('#resultTarget');
   let prs = [];
+  let activeCall;
 
   function updatePrInfo() {
     const pr = mainInput.checked ? null : prs.find(item => String(item.number) === prInput.value.trim());
     prList.value = pr ? String(pr.number) : '';
     imageStatus.textContent = mainInput.checked ? 'main 환경 선택됨' : pr ? pr.imageLabel : '이미지 상태 미확인';
-    imageStatus.dataset.state = !pr ? 'idle' : pr.imageLabel === '이미지 존재' ? 'available' : pr.imageLabel === '이미지 없음' ? 'missing' : 'error';
+    imageStatus.dataset.state = !pr || pr.imageLabel === '이미지 상태 미확인' ? 'idle' : pr.imageLabel === '이미지 존재' ? 'available' : pr.imageLabel === '이미지 없음' ? 'missing' : 'error';
     prInfo.textContent = mainInput.checked ? 'main 환경에 API를 요청합니다.' : pr ? `최신 커밋 ${pr.sha.slice(0, 12)} 기준 · EKS 배포 상태는 별도입니다.` : 'PR을 새로고침하고 선택하면 이미지 상태를 확인할 수 있습니다.';
   }
   prList.addEventListener('change', () => {
@@ -157,18 +160,22 @@ HTML = r'''<!doctype html>
     imageStatus.textContent = '이미지 상태 확인 중';
     imageStatus.dataset.state = 'idle';
     prInfo.textContent = 'GitHub와 GHCR을 조회하고 있습니다…';
-    try {
-      const response = await fetch('/api/prs');
+    async function loadList(url) {
+      const response = await fetch(url);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '조회 실패');
       prs = data.prs;
       prList.replaceChildren(new Option(prs.length ? 'PR을 선택하세요' : '열린 PR이 없습니다', ''));
       for (const pr of prs) prList.add(new Option(`#${pr.number} ${pr.title} — ${pr.imageLabel}`, pr.number));
       updatePrInfo();
+    }
+    try {
+      await loadList('/api/prs?images=0');
+      if (prs.length) await loadList('/api/prs');
     } catch (error) {
-      prs = []; prList.replaceChildren(new Option('조회 실패', ''));
+      if (!prs.length) prList.replaceChildren(new Option('조회 실패', ''));
       imageStatus.textContent = '이미지 상태 확인 불가'; imageStatus.dataset.state = 'error';
-      prInfo.textContent = error.message;
+      prInfo.textContent = prs.length ? '표시된 목록의 최신 상태를 확인하지 못했습니다. ' + error.message : error.message;
     } finally { refreshPr.disabled = false; }
   });
 
@@ -177,6 +184,11 @@ HTML = r'''<!doctype html>
     return `${base}/${mainInput.checked ? 'main' : `pr-${prInput.value || '<PR 번호>'}`}`;
   }
   function refresh() {
+    if (activeCall) { activeCall.abort(); activeCall = null; }
+    buttons.forEach(item => item.disabled = false);
+    status.textContent = '호출할 API를 선택하세요.';
+    output.textContent = '아직 호출 결과가 없습니다.';
+    resultTarget.textContent = '';
     prInput.disabled = mainInput.checked;
     prList.disabled = mainInput.checked;
     updatePrInfo();
@@ -191,22 +203,30 @@ HTML = r'''<!doctype html>
     const endpoint = button.dataset.endpoint;
     const prNumber = prInput.value.trim();
     if (!mainInput.checked && !/^[1-9]\d*$/.test(prNumber)) {
-      status.textContent = '입력 확인'; output.textContent = 'PR 번호에 1 이상의 정수를 입력하세요.'; return;
+      status.textContent = '입력 확인'; output.textContent = 'PR 번호에 1 이상의 정수를 입력하세요.'; resultTarget.textContent = ''; return;
     }
     buttons.forEach(item => item.disabled = true);
+    const call = new AbortController();
+    activeCall = call;
     status.textContent = '호출 중…'; output.textContent = ''; resultTarget.textContent = `요청: ${deploymentPath()}/${endpoint}`;
     try {
       const response = await fetch('/api/call', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', signal: call.signal, headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ baseUrl: baseInput.value.trim(), isMain: mainInput.checked, prNumber, endpoint })
       });
       const data = await response.json();
+      if (activeCall !== call) return;
+      if (data.url) {
+        resultTarget.textContent = '요청: ' + data.url + (data.finalUrl && data.finalUrl !== data.url ? ' → 최종 응답: ' + data.finalUrl : '');
+      }
       status.textContent = data.status ? `HTTP ${data.status} · ${data.ok ? '성공' : '실패'}` : (data.ok ? '성공' : '호출 실패');
       const body = data.body === undefined ? '' : (typeof data.body === 'string' ? data.body : JSON.stringify(data.body, null, 2));
-      output.textContent = data.error ? [data.error, body].filter(Boolean).join('\n') : body;
+      output.textContent = [data.error, data.truncated ? '본문을 1,000,000바이트까지만 표시합니다.' : '', body].filter(Boolean).join('\n');
     } catch (error) {
-      status.textContent = '호출 실패'; output.textContent = error.message;
-    } finally { buttons.forEach(item => item.disabled = false); }
+      if (activeCall === call) { status.textContent = '호출 실패'; output.textContent = error.message; }
+    } finally {
+      if (activeCall === call) { activeCall = null; buttons.forEach(item => item.disabled = false); }
+    }
   }));
 </script>
 </body>
@@ -215,14 +235,17 @@ HTML = r'''<!doctype html>
 
 def github_command(*args):
     try:
-        result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=30)
+        result = subprocess.run(["gh", *args], capture_output=True, timeout=30)
     except FileNotFoundError:
         raise RuntimeError("GitHub CLI(gh)가 필요합니다. 설치 후 gh auth login을 실행하세요.")
     except subprocess.TimeoutExpired:
         raise RuntimeError("GitHub 연결 시간이 초과됐습니다.")
     if result.returncode:
         raise RuntimeError("GitHub 조회에 실패했습니다. gh auth status와 저장소 접근 권한을 확인하세요.")
-    return result.stdout
+    try:
+        return result.stdout.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise RuntimeError("GitHub CLI 출력이 UTF-8 형식인지 확인하세요.") from error
 
 
 def registry_token():
@@ -247,14 +270,17 @@ def image_status(pr, token):
             return "이미지 존재"
     except HTTPError as error:
         return "이미지 없음" if error.code == 404 else f"확인 불가 (HTTP {error.code})"
-    except (URLError, TimeoutError, OSError):
+    except (URLError, TimeoutError, OSError, HTTPException):
         return "확인 불가 (연결 오류)"
 
 
-def list_prs():
+def list_prs(include_images=True):
     raw = github_command("api", "--paginate", "--slurp", "repos/ASBG-PReview/PReview/pulls?state=open&per_page=100")
     pages = json.loads(raw)
-    prs = [{"number": item["number"], "title": item["title"], "sha": item["head"]["sha"]} for page in pages for item in page]
+    prs = [{"number": item["number"], "title": item["title"], "sha": item["head"]["sha"],
+            "imageLabel": "이미지 상태 미확인"} for page in pages for item in page]
+    if not include_images or not prs:
+        return prs
     try:
         token = registry_token()
     except HTTPError as error:
@@ -264,7 +290,7 @@ def list_prs():
             label = "확인 불가 (Python SSL 인증서 오류)"
         else:
             label = "확인 불가 (GHCR 연결 오류)"
-    except (TimeoutError, OSError):
+    except (TimeoutError, OSError, HTTPException):
         label = "확인 불가 (GHCR 연결 오류)"
     except (RuntimeError, KeyError, ValueError):
         label = "확인 불가 (GHCR 인증 정보 조회 오류)"
@@ -273,14 +299,13 @@ def list_prs():
             for pr, label in zip(prs, pool.map(lambda item: image_status(item, token), prs)):
                 pr["imageLabel"] = label
         return prs
-    if prs:
-        for pr in prs:
-            pr["imageLabel"] = label
+    for pr in prs:
+        pr["imageLabel"] = label
     return prs
 
 
 def send_json(handler, status, body):
-    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    payload = json.dumps(body, allow_nan=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Content-Length", str(len(payload)))
@@ -288,12 +313,28 @@ def send_json(handler, status, body):
     handler.wfile.write(payload)
 
 
+def upstream_result(response, requested_url):
+    content = response.read(MAX_RESPONSE + 1)
+    truncated = len(content) > MAX_RESPONSE
+    text = content[:MAX_RESPONSE].decode("utf-8", errors="replace")
+    body = text
+    if not truncated:
+        try:
+            parsed_body = json.loads(text)
+            json.dumps(parsed_body, allow_nan=False)
+            body = parsed_body
+        except (ValueError, RecursionError):
+            pass
+    return {"ok": 200 <= response.status < 300, "status": response.status,
+            "url": requested_url, "finalUrl": response.geturl(), "body": body, "truncated": truncated}
+
+
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path == "/api/prs":
+        if self.path in ("/api/prs", "/api/prs?images=0"):
             try:
-                return send_json(self, 200, {"prs": list_prs()})
-            except (RuntimeError, ValueError, KeyError):
+                return send_json(self, 200, {"prs": list_prs(include_images=self.path == "/api/prs")})
+            except (RuntimeError, ValueError, KeyError, TypeError):
                 return send_json(self, 502, {"error": "GitHub 조회에 실패했습니다. GitHub CLI 설치, gh auth login 및 저장소 접근 권한을 확인하세요."})
         if self.path not in ("/", "/index.html"):
             return send_json(self, 404, {"error": "Not found"})
@@ -309,16 +350,21 @@ class Handler(BaseHTTPRequestHandler):
             return send_json(self, 404, {"error": "Not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
+            if length < 1:
+                return send_json(self, 400, {"error": "요청 데이터를 확인하세요."})
             if length > 16_384:
                 return send_json(self, 413, {"error": "Request too large"})
             values = json.loads(self.rfile.read(length))
+            if not isinstance(values, dict) or not isinstance(values.get("baseUrl"), str):
+                return send_json(self, 400, {"error": "고정 주소와 API를 지정하세요."})
             endpoint = values.get("endpoint")
             if endpoint not in ENDPOINTS:
                 return send_json(self, 400, {"error": "Unknown endpoint"})
 
             raw_base = values.get("baseUrl", "").strip().rstrip("/")
             parsed = urlsplit(raw_base)
-            if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username or parsed.password:
+            if (parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.port == 0
+                    or parsed.username is not None or parsed.password is not None):
                 return send_json(self, 400, {"error": "고정 주소는 http:// 또는 https://가 포함된 유효한 주소여야 합니다."})
             if parsed.query or parsed.fragment:
                 return send_json(self, 400, {"error": "고정 주소에 query string이나 fragment를 포함할 수 없습니다."})
@@ -326,12 +372,14 @@ class Handler(BaseHTTPRequestHandler):
             if not base_path.endswith("/container-2"):
                 return send_json(self, 400, {"error": "고정 주소는 /container-2까지 입력해야 합니다."})
 
-            is_main = values.get("isMain") is True
+            is_main = values.get("isMain", False)
+            if not isinstance(is_main, bool):
+                return send_json(self, 400, {"error": "main 선택값을 확인하세요."})
             if is_main:
                 deployment = "main"
             else:
                 pr_number = str(values.get("prNumber", ""))
-                if not re.fullmatch(r"[1-9]\d*", pr_number):
+                if not re.fullmatch(r"[1-9][0-9]*", pr_number):
                     return send_json(self, 400, {"error": "PR 번호에 1 이상의 정수를 입력하세요."})
                 deployment = f"pr-{pr_number}"
 
@@ -339,25 +387,17 @@ class Handler(BaseHTTPRequestHandler):
             target_url = urlunsplit((parsed.scheme, parsed.netloc, target_path, "", ""))
             request = Request(target_url, headers={"Accept": "application/json", "User-Agent": "PReview-local-api-caller/1.0"})
             try:
-                with urlopen(request, timeout=15) as response:
-                    content = response.read(1_000_001)
-                    text = content.decode("utf-8", errors="replace")
-                    try:
-                        body = json.loads(text)
-                    except json.JSONDecodeError:
-                        body = text
-                    return send_json(self, 200, {"ok": 200 <= response.status < 300, "status": response.status, "url": target_url, "body": body})
-            except HTTPError as error:
-                text = error.read(1_000_001).decode("utf-8", errors="replace")
                 try:
-                    body = json.loads(text)
-                except json.JSONDecodeError:
-                    body = text
-                return send_json(self, 200, {"ok": False, "status": error.code, "url": target_url, "body": body})
-            except (URLError, TimeoutError) as error:
+                    response = urlopen(request, timeout=15)
+                except HTTPError as error:
+                    response = error
+                with response:
+                    result = upstream_result(response, target_url)
+            except (URLError, OSError, HTTPException) as error:
                 reason = getattr(error, "reason", error)
                 return send_json(self, 200, {"ok": False, "url": target_url, "error": f"EKS API에 연결할 수 없습니다: {reason}"})
-        except (ValueError, TypeError, json.JSONDecodeError):
+            return send_json(self, 200, result)
+        except (ValueError, TypeError, RecursionError):
             return send_json(self, 400, {"error": "요청 데이터를 확인하세요."})
 
     def log_message(self, fmt, *args):

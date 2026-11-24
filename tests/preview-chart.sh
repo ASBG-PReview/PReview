@@ -39,3 +39,5 @@ for invalid in 'image.digest=' 'image.digest=latest' 'preview.prNumber=' \
 done
 
 helm template preview-local "$chart" -f "$chart/values-local.yaml" >/dev/null
+make -n build load lint deploy test clean >/dev/null
+python3 -B -O tests/local-preview.py

@@ -12,7 +12,7 @@ spec:
         revision: preview-state
         requeueAfterSeconds: 60
         files:
-          - path: previews/pr-*/state.json
+          - path: deployments/pr-*/state.json
   syncPolicy:
     preserveResourcesOnDeletion: false
   template:
@@ -22,7 +22,7 @@ spec:
       project: default
       source:
         repoURL: https://github.com/ASBG-PReview/PReview.git
-        targetRevision: main
+        targetRevision: '{{ if not (regexMatch "^[0-9a-f]{40}$" .chartRevision) }}{{ fail "invalid chartRevision" }}{{ end }}{{ .chartRevision }}'
         path: charts/preview-api
         helm:
           releaseName: 'preview-pr-{{ .prNumber }}'
@@ -45,7 +45,7 @@ spec:
             - name: imagePullSecrets[0].name
               value: ghcr-pull
       destination:
-        # Argo CD가 설치된 EKS 자체를 배포 대상으로 사용합니다.
+        # 로컬 Argo CD에서는 render-eks.sh로 등록된 EKS 서버 주소를 지정합니다.
         server: https://kubernetes.default.svc
         namespace: container-2
       syncPolicy:

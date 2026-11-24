@@ -1,44 +1,167 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { promoteMain } from '../scripts/promote-main.mjs';
+import { createHash } from 'node:crypto';
+import { mainImageIntent, promoteMain } from '../scripts/promote-main.mjs';
+
 const sha = 'a'.repeat(40);
-const identity = { repository: 'ASBG-PReview/PReview', sha, digest: 'sha256:' + 'b'.repeat(64) };
-function fixture({ missing = false, stale = false, advance = false, conflict = false, forbidden = false } = {}) {
-  const calls = []; let reads = 0;
-  const api = async (method, path, body) => {
-    calls.push({ method, path, body });
-    if (path.endsWith('/ref/heads/main')) return { object: { sha: stale || (advance && reads++ > 0) ? 'c'.repeat(40) : sha } };
-    if (path.endsWith('/ref/heads/main-deploy')) {
-      if (missing || forbidden) throw Object.assign(new Error('lookup'), { status: forbidden ? 403 : 404 });
-      return { object: { sha: 'previous' } };
+const older = 'c'.repeat(40);
+const identity = { repository: 'example/preview', sha, digest: 'sha256:' + 'b'.repeat(64) };
+const alternate = 'sha256:' + 'd'.repeat(64);
+const idOf = value => createHash('sha1').update(JSON.stringify(value)).digest('hex');
+
+function fixture({ initialSha = older, subject = 'Deploy main ' + older, missing = false } = {}) {
+  let main = sha;
+  let ref = missing ? undefined : '1'.repeat(40);
+  const calls = [];
+  const commits = new Map([
+    [sha, { tree: { sha: 'tested-source-tree' } }],
+    [older, { tree: { sha: 'older-source-tree' } }],
+  ]);
+  if (ref) commits.set(ref, { message: subject, tree: { sha: initialSha } });
+  const hook = {};
+  const root = '/repos/example/preview/git/';
+  async function api(method, url, body) {
+    assert.ok(url.startsWith(root));
+    const path = url.slice(root.length);
+    const call = { method, path, body };
+    calls.push(call);
+    hook.before?.(call);
+    if (method === 'GET') {
+      if (path === 'ref/heads/main') return { object: { sha: main } };
+      if (path === 'ref/heads/main-deploy') {
+        if (!ref) throw Object.assign(Error('missing ref'), { status: 404 });
+        return { object: { sha: ref } };
+      }
+      if (path.startsWith('commits/')) {
+        const commit = commits.get(path.slice(8));
+        assert.ok(commit, 'Unknown commit ' + path);
+        return commit;
+      }
     }
-    if (method === 'GET') return { tree: { sha: 'tested-tree' } };
-    if (method === 'PATCH' && conflict) throw Object.assign(new Error('conflict'), { status: 422 });
-    return { sha: 'new' };
+    if (method === 'POST' && path === 'trees') return { sha: idOf(body) };
+    if (method === 'POST' && path === 'commits') {
+      const id = idOf(body);
+      commits.set(id, { message: body.message, tree: { sha: body.tree }, parents: body.parents });
+      return { sha: id };
+    }
+    if (method === 'PATCH' && path === 'refs/heads/main-deploy') {
+      assert.equal(body.force, false);
+      if (commits.get(body.sha)?.parents[0] !== ref) throw Object.assign(Error('conflict'), { status: 422 });
+    } else if (method === 'POST' && path === 'refs') {
+      assert.equal(ref, undefined);
+      assert.equal(body.ref, 'refs/heads/main-deploy');
+    } else throw Error('Unexpected API ' + method + ' ' + path);
+    ref = body.sha;
+    hook.afterWrite?.();
+    return {};
+  }
+  return { api, calls, hook, get ref() { return ref; },
+    moveMain(value) { main = value; },
+    operatorUpdate(message) {
+      ref = idOf([message, ref]);
+      commits.set(ref, { message, tree: { sha: 'restored-tree' } });
+      return ref;
+    },
+    writes: () => calls.filter(c => c.method !== 'GET' && c.path.startsWith('refs')),
   };
-  return { api, calls };
 }
-test('promotes digest with tested source tree and preserves deployment history', async () => {
-  const f = fixture(); await promoteMain(f.api, identity);
-  const tree = f.calls.find(x => x.path.endsWith('/trees')).body;
-  assert.equal(tree.base_tree, 'tested-tree');
-  assert.deepEqual(JSON.parse(tree.tree[0].content), { image: { repository: 'ghcr.io/asbg-preview/preview', digest: identity.digest }, main: { commitSha: sha } });
-  assert.deepEqual(f.calls.find(x => x.path.endsWith('/commits') && x.method === 'POST').body.parents, ['previous']);
-  assert.deepEqual(f.calls.at(-1).body, { sha: 'new', force: false });
+
+test('first main deployment pins the tested source tree and its digest', async () => {
+  const f = fixture({ missing: true });
+  const result = await promoteMain(f.api, identity);
+  assert.equal(result, f.ref);
+  const tree = f.calls.find(c => c.path === 'trees').body;
+  assert.equal(tree.base_tree, 'tested-source-tree');
+  assert.deepEqual(JSON.parse(tree.tree[0].content), {
+    image: { repository: 'ghcr.io/example/preview', digest: identity.digest }, main: { commitSha: sha },
+  });
+  assert.deepEqual(f.calls.find(c => c.path === 'commits').body.parents, [sha]);
+  assert.equal(f.calls.find(c => c.path === 'commits').body.message, `main 배포 ${sha}`);
+  assert.equal(f.writes().length, 1);
 });
-test('initializes deployment branch only on 404', async () => {
-  const f = fixture({ missing: true }); await promoteMain(f.api, identity);
-  assert.equal(f.calls.at(-1).body.ref, 'refs/heads/main-deploy');
+
+test('existing promoted deployment advances once despite repeated identical delivery', async () => {
+  const f = fixture();
+  const previous = f.ref;
+  const first = await promoteMain(f.api, identity);
+  const again = await promoteMain(f.api, identity);
+  assert.equal(again, first);
+  assert.deepEqual(f.calls.find(c => c.path === 'commits').body.parents, [previous]);
+  assert.equal(f.calls.filter(c => c.path === 'commits' && c.method === 'POST').length, 1);
+  assert.equal(f.writes().length, 1);
+  await assert.rejects(promoteMain(f.api, { ...identity, digest: alternate }), /different deployment tree/);
+  assert.equal(f.ref, first);
 });
-for (const mode of ['stale', 'advance', 'forbidden']) test(`does not move deployment ref on ${mode}`, async () => {
-  const f = fixture({ [mode]: true }); await assert.rejects(promoteMain(f.api, identity));
-  assert.ok(!f.calls.some(x => x.method === 'PATCH' || x.path.endsWith('/refs')));
+
+test('successful ref write with a lost response converges on retry', async () => {
+  const f = fixture();
+  f.hook.afterWrite = () => { throw Error('lost response'); };
+  await assert.rejects(promoteMain(f.api, identity), /lost response/);
+  delete f.hook.afterWrite;
+  assert.equal(await promoteMain(f.api, identity), f.ref);
+  assert.equal(f.writes().length, 1);
 });
-test('does not force or retry a concurrent deployment update', async () => {
-  const f = fixture({ conflict: true }); await assert.rejects(promoteMain(f.api, identity));
-  assert.equal(f.calls.filter(x => x.method === 'PATCH').length, 1);
-  assert.equal(f.calls.at(-1).body.force, false);
+
+test('rollback blocks late delivery until a writer explicitly resumes the same SHA and digest', async () => {
+  const f = fixture();
+  await promoteMain(f.api, identity);
+  const rollback = f.operatorUpdate('Roll back after failed readiness');
+  await assert.rejects(promoteMain(f.api, identity), /hold/);
+  assert.equal(f.ref, rollback);
+  f.operatorUpdate('main 배포 재개 ' + sha + ' ' + alternate);
+  await assert.rejects(promoteMain(f.api, identity), /hold/);
+  const resume = f.operatorUpdate('main 배포 재개 ' + sha + ' ' + identity.digest);
+  await promoteMain(f.api, identity);
+  assert.notEqual(f.ref, resume);
+  assert.equal(f.writes().length, 2);
 });
-test('rejects unverified digest before any API request', async () => {
-  const f = fixture(); await assert.rejects(promoteMain(f.api, { ...identity, digest: 'latest' })); assert.equal(f.calls.length, 0);
+
+test('older English subjects and pre-existing resume approvals remain readable', async () => {
+  for (const subject of ['Deploy main ' + older, 'Resume main ' + sha + ' ' + identity.digest]) {
+    const f = fixture({ subject });
+    assert.equal(await promoteMain(f.api, identity), f.ref);
+    assert.equal(f.writes().length, 1);
+  }
+});
+
+test('concurrent operator recovery wins the fast-forward race', async () => {
+  const f = fixture();
+  f.hook.before = c => { if (c.method === 'PATCH') f.operatorUpdate('Roll back now'); };
+  await assert.rejects(promoteMain(f.api, identity), /conflict/);
+  delete f.hook.before;
+  await assert.rejects(promoteMain(f.api, identity), /hold/);
+});
+
+test('a stale build, including one superseded while preparing a commit, cannot advance a ref', async () => {
+  for (const initiallyStale of [true, false]) {
+    const f = fixture();
+    if (initiallyStale) f.moveMain(older);
+    else f.hook.before = c => { if (c.path === 'commits' && c.method === 'POST') f.moveMain(older); };
+    await assert.rejects(promoteMain(f.api, identity), /superseded|advanced/i);
+    assert.deepEqual(f.writes(), []);
+  }
+});
+
+test('reports changes immediately after an accepted ref movement', async () => {
+  const f = fixture();
+  f.hook.afterWrite = () => f.moveMain(older);
+  await assert.rejects(promoteMain(f.api, identity), /advanced after the ref write/);
+  assert.equal(f.writes().length, 1);
+});
+
+test('unreadable prior ref never bootstraps a new deployment', async () => {
+  const f = fixture();
+  f.hook.before = c => { if (c.path === 'ref/heads/main-deploy') throw Object.assign(Error('forbidden'), { status: 403 }); };
+  await assert.rejects(promoteMain(f.api, identity), /forbidden/);
+  assert.deepEqual(f.writes(), []);
+});
+
+test('main authorization binds a canonical repository, exact commit and digest', async () => {
+  assert.equal(mainImageIntent(identity), mainImageIntent({ ...identity, repository: 'Example/Preview' }));
+  assert.notEqual(mainImageIntent(identity), mainImageIntent({ ...identity, digest: alternate }));
+  assert.notEqual(mainImageIntent(identity), mainImageIntent({ ...identity, sha: older }));
+  const f = fixture();
+  await assert.rejects(promoteMain(f.api, { ...identity, digest: 'latest' }));
+  assert.throws(() => mainImageIntent({ ...identity, sha: 'main' }));
+  assert.equal(f.calls.length, 0);
 });

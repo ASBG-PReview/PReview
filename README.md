@@ -13,6 +13,8 @@ curl http://localhost:8080/environment
 docker compose down
 ```
 
+Java 21에서 컨테이너 없이 검증하려면 `preview-api`에서 `./gradlew verifyPreviewTests bootJar`를 실행합니다. 한국어 Windows의 한글 작업 경로에서 Gradle 8.14.3 테스트 실행기가 컴파일된 클래스를 찾지 못하면 영문 경로에서 다시 실행하거나 별도 PowerShell 창에서 `$env:JAVA_TOOL_OPTIONS='-Dfile.encoding=MS949'`를 설정한 뒤 `.\gradlew.bat verifyPreviewTests bootJar`를 실행합니다.
+
 ## EKS API 호출기
 
 로컬 브라우저에서 main 또는 PR 배포의 `/health`, `/environment`, `/version` 응답을 확인할 수 있습니다. Python 3만 있으면 실행되며, EKS 고정 주소는 `/container-2`까지 입력합니다.
@@ -59,30 +61,28 @@ main 직접 push·force push·삭제는 금지합니다. 관리자 예외는 승
 
 차트는 `charts/preview-api`에 있습니다. `/version`은 빌드에 포함된 애플리케이션 버전을 반환합니다(예: `{"version":"0.0.1"}`). 버전 시연을 위한 PR에서는 `preview-api/src/main/version.txt`의 값을 변경합니다. CI는 실제 컨테이너 응답이 이 값과 일치하는지 확인합니다. `Chart.yaml`의 `version`은 차트 자체의 버전이고 `appVersion`은 차트가 설명하는 애플리케이션 버전입니다.
 
-로컬 minikube를 시작한 뒤 저장소 루트에서 다음 명령을 순서대로 실행합니다. `make deploy`는 로컬 네임스페이스를 만들고 `quota.yaml`의 ResourceQuota와 LimitRange를 적용합니다. `make test`는 임시 포트 연결을 열어 상태, 환경 정보와 버전을 확인합니다. Python 3와 curl이 필요하며 기본 로컬 포트는 18080입니다.
+로컬 minikube를 시작한 뒤 저장소 루트에서 실행합니다. Docker, minikube, kubectl, Helm, GNU Make, Python 3와 curl이 필요합니다. 기본 프로필은 `minikube`입니다. 다른 프로필을 사용하면 모든 명령에 같은 `MINIKUBE_PROFILE`을 지정합니다.
 
 ```sh
 make build
-make load
 make lint
 make deploy
 make test
 make clean
 ```
 
-기본 네임스페이스는 `preview-local`입니다. `values-local.yaml`은 로컬 모드를 명시적으로 켜서 태그 이미지와 테스트용 식별자를 허용합니다. 기본 PR 배포 모드는 검증된 digest와 양의 정수 PR 번호, 전체 커밋 SHA를 필수로 요구합니다. 값을 바꿀 때는 배포와 테스트에 동일하게 전달합니다(예: `make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 Helm 배포를 삭제하며 로컬 네임스페이스와 할당량은 유지합니다. 로컬 Ingress를 사용하려면 minikube ingress 애드온을 활성화해야 합니다.
+`make deploy`는 로컬 Docker 이미지 ID에서 `local-<64자리>` 태그를 만들고 선택한 프로필에 이미지를 로드합니다. 같은 `IMAGE_TAG`로 다시 빌드해도 내용이 달라지면 Pod 이미지가 바뀝니다. `make load`로 이미지 로드만 실행할 수도 있습니다. 배포는 `preview-local` 네임스페이스와 로컬 `quota.yaml`을 준비한 뒤 rollout 완료를 기다립니다. `make test`는 현재 Docker 이미지와 Deployment의 이미지가 일치하는지 확인하고 임시 포트 포워딩(기본 18080)으로 상태·환경·버전을 검증합니다. 배포와 테스트에는 동일한 식별자를 전달합니다(`make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 해당 Helm 릴리스를 삭제합니다. 로컬 Ingress에는 minikube의 nginx ingress 애드온이 필요합니다.
+
+아래 명령은 수동 EKS 배포에 사용할 PR 매니페스트를 렌더링합니다. Argo CD가 이미 관리하는 릴리스는 같은 상태 파일을 통해 갱신합니다. 검증한 PR 번호·전체 head SHA·이미지 digest와 그 상태에 기록된 `chartRevision`의 차트를 함께 사용합니다.
 
 ```sh
-helm lint charts/preview-api -f charts/preview-api/values-local.yaml
-helm upgrade --install preview-pr-12 charts/preview-api \
-  --namespace "$TEAM_NAMESPACE" -f charts/preview-api/values-eks.yaml \
-  --set-string preview.prNumber=12 \
+PR_NUMBER=12
+helm template "preview-pr-$PR_NUMBER" charts/preview-api \
+  --namespace container-2 -f charts/preview-api/values-eks.yaml \
+  --set-string preview.prNumber="$PR_NUMBER" \
   --set-string preview.commitSha="$HEAD_SHA" \
   --set-string image.digest="$IMAGE_DIGEST" \
-  --set-string ingress.path="$TEAM_PATH" \
-  --set-string 'ingress.annotations.alb\.ingress\.kubernetes\.io/group\.name'="$ALB_GROUP"
+  --set-string basePath="/container-2/pr-$PR_NUMBER"
 ```
 
-`TEAM_NAMESPACE`, `TEAM_PATH`, `ALB_GROUP`은 운영진이 안내한 값으로 설정합니다. `IMAGE_DIGEST`에는 위 `resolve` 결과에서 이미지 이름 뒤의 `sha256:…` 부분을 전달합니다. digest를 지정하면 태그보다 우선하며, 형식 검사만으로 이미지의 신뢰성을 보장할 수 없으므로 PR 배포에는 `resolve`로 검증한 digest를 사용합니다. 로컬에서는 `values-local.yaml`의 버전 태그를 사용할 수 있습니다. 차트는 Deployment, ClusterIP Service와 활성화된 경우 Ingress를 생성하며 네임스페이스는 만들지 않습니다.
-
-Ingress의 경로는 요청을 그대로 전달합니다. `/health` 등 애플리케이션의 루트 경로를 사용하는 API가 팀별 접두 경로에서도 동작하려면 Ingress 컨트롤러의 경로 변환 또는 애플리케이션 설정을 별도로 확인해야 합니다. 로컬 Ingress를 사용하려면 minikube의 nginx ingress 애드온이 필요합니다. 리소스 기본값은 컨테이너당 CPU 50m/200m, 메모리 128Mi/256Mi(request/limit)이며 네임스페이스의 전체 할당량을 다른 배포와 함께 고려해야 합니다.
+`IMAGE_DIGEST`는 `resolve` 결과의 `sha256:…` 부분입니다. 독립 릴리스를 실제로 설치할 때는 대상 EKS 컨텍스트·기존 소유자·가용 quota를 확인하고 위 `helm template`을 `helm --kube-context "$EKS_CONTEXT" upgrade --install`로 바꿉니다. Ingress의 ALB 그룹은 `sbg-demo`이며 요청 경로는 Pod까지 그대로 전달됩니다. 세 API와 probe, ALB health check는 동일한 접두 경로를 사용합니다. EKS Pod당 요청량은 50m/128Mi, 상한은 200m/320Mi입니다. 로컬 예시 quota와 실제 EKS quota를 구분해 계산합니다.

@@ -37,8 +37,7 @@ spec:
   strategy:
     type: RollingUpdate
     rollingUpdate:
-      maxSurge: 0
-      maxUnavailable: 1
+      {{- toYaml .Values.rollingUpdate | nindent 6 }}
   selector:
     matchLabels:
       {{- include "preview-api.selectorLabels" . | nindent 6 }}
@@ -65,6 +64,8 @@ spec:
               containerPort: 8080
           env:
             - name: BASE_PATH
+              value: {{ include "preview-api.basePath" . | quote }}
+            - name: SERVER_SERVLET_CONTEXT_PATH
               value: {{ include "preview-api.basePath" . | quote }}
             - name: PR_NUMBER
               value: {{ ternary "main" (toString .Values.preview.prNumber) $main | quote }}
