@@ -143,40 +143,67 @@ HTML = r'''<!doctype html>
   const imageStatus = document.querySelector('#imageStatus');
   const resultTarget = document.querySelector('#resultTarget');
   let prs = [];
+  let catalogState = 'idle';
+  let catalogError = '';
   let activeCall;
 
   function updatePrInfo() {
     const pr = mainInput.checked ? null : prs.find(item => String(item.number) === prInput.value.trim());
     prList.value = pr ? String(pr.number) : '';
+    if (!mainInput.checked && catalogState === 'loading') {
+      imageStatus.textContent = '이미지 상태 확인 중';
+      imageStatus.dataset.state = 'idle';
+      prInfo.textContent = 'GitHub와 GHCR을 조회하고 있습니다…';
+      return;
+    }
+    if (!mainInput.checked && catalogState === 'error') {
+      imageStatus.textContent = '이미지 상태 확인 불가';
+      imageStatus.dataset.state = 'error';
+      prInfo.textContent = prs.length ? '표시된 목록의 최신 상태를 확인하지 못했습니다. ' + catalogError : catalogError;
+      return;
+    }
     imageStatus.textContent = mainInput.checked ? 'main 환경 선택됨' : pr ? pr.imageLabel : '이미지 상태 미확인';
     imageStatus.dataset.state = !pr || pr.imageLabel === '이미지 상태 미확인' ? 'idle' : pr.imageLabel === '이미지 존재' ? 'available' : pr.imageLabel === '이미지 없음' ? 'missing' : 'error';
     prInfo.textContent = mainInput.checked ? 'main 환경에 API를 요청합니다.' : pr ? `최신 커밋 ${pr.sha.slice(0, 12)} 기준 · EKS 배포 상태는 별도입니다.` : 'PR을 새로고침하고 선택하면 이미지 상태를 확인할 수 있습니다.';
   }
   prList.addEventListener('change', () => {
-    if (prList.value) { prInput.value = prList.value; mainInput.checked = false; refresh(); }
+    prInput.value = prList.value;
+    refresh();
   });
+  function renderPrList() {
+    const empty = catalogState === 'error' ? '조회 실패' : catalogState === 'loading' ? 'PR 조회 중…' : '열린 PR이 없습니다';
+    prList.replaceChildren(new Option(prs.length ? 'PR을 선택하세요' : empty, ''));
+    for (const pr of prs) {
+      const label = catalogState === 'ready' ? pr.imageLabel : '이미지 상태 미확인';
+      prList.add(new Option(`#${pr.number} ${pr.title} — ${label}`, pr.number));
+    }
+    updatePrInfo();
+  }
   refreshPr.addEventListener('click', async () => {
     refreshPr.disabled = true;
-    imageStatus.textContent = '이미지 상태 확인 중';
-    imageStatus.dataset.state = 'idle';
-    prInfo.textContent = 'GitHub와 GHCR을 조회하고 있습니다…';
+    catalogState = 'loading';
+    catalogError = '';
+    renderPrList();
     async function loadList(url) {
       const response = await fetch(url);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '조회 실패');
-      prs = data.prs;
-      prList.replaceChildren(new Option(prs.length ? 'PR을 선택하세요' : '열린 PR이 없습니다', ''));
-      for (const pr of prs) prList.add(new Option(`#${pr.number} ${pr.title} — ${pr.imageLabel}`, pr.number));
-      updatePrInfo();
+      return data.prs;
     }
     try {
-      await loadList('/api/prs?images=0');
-      if (prs.length) await loadList('/api/prs');
+      prs = await loadList('/api/prs?images=0');
+      if (prs.length) {
+        renderPrList();
+        prs = await loadList('/api/prs');
+      }
+      catalogState = 'ready';
     } catch (error) {
-      if (!prs.length) prList.replaceChildren(new Option('조회 실패', ''));
-      imageStatus.textContent = '이미지 상태 확인 불가'; imageStatus.dataset.state = 'error';
-      prInfo.textContent = prs.length ? '표시된 목록의 최신 상태를 확인하지 못했습니다. ' + error.message : error.message;
-    } finally { refreshPr.disabled = false; }
+      catalogState = 'error';
+      catalogError = error.message;
+    } finally {
+      renderPrList();
+      refreshPr.disabled = false;
+    }
   });
 
   function deploymentPath() {
@@ -250,11 +277,12 @@ def github_command(*args):
 
 def registry_token():
     # gh manages the credential locally; it is never sent to the browser.
-    credential = github_command("auth", "token").strip()
-    username = github_command("api", "user", "--jq", ".login").strip()
+    credential = github_command("auth", "token", "--hostname", "github.com").strip()
+    username = github_command("api", "--hostname", "github.com", "user", "--jq", ".login").strip()
     auth = base64.b64encode(f"{username}:{credential}".encode()).decode()
     query = urlencode({"service": "ghcr.io", "scope": "repository:asbg-preview/preview:pull"})
-    request = Request(f"https://ghcr.io/token?{query}", headers={"Authorization": f"Basic {auth}", "User-Agent": "PReview-local-api-caller"})
+    request = Request(f"https://ghcr.io/token?{query}", headers={"User-Agent": "PReview-local-api-caller"})
+    request.add_unredirected_header("Authorization", f"Basic {auth}")
     with urlopen(request, timeout=15) as response:
         return json.load(response)["token"]
 
@@ -262,12 +290,15 @@ def registry_token():
 def image_status(pr, token):
     tag = f"pr-{pr['number']}-{pr['sha']}"
     request = Request(f"https://ghcr.io/v2/asbg-preview/preview/manifests/{tag}", headers={
-        "Authorization": f"Bearer {token}", "User-Agent": "PReview-local-api-caller",
+        "User-Agent": "PReview-local-api-caller",
         "Accept": "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json",
     }, method="HEAD")
+    request.add_unredirected_header("Authorization", f"Bearer {token}")
     try:
-        with urlopen(request, timeout=15):
-            return "이미지 존재"
+        with urlopen(request, timeout=15) as response:
+            if response.status == 200 and re.fullmatch(r"sha256:[0-9a-f]{64}", response.headers.get("Docker-Content-Digest", "")):
+                return "이미지 존재"
+            return "확인 불가 (이미지 응답 형식)"
     except HTTPError as error:
         return "이미지 없음" if error.code == 404 else f"확인 불가 (HTTP {error.code})"
     except (URLError, TimeoutError, OSError, HTTPException):
@@ -275,7 +306,7 @@ def image_status(pr, token):
 
 
 def list_prs(include_images=True):
-    raw = github_command("api", "--paginate", "--slurp", "repos/ASBG-PReview/PReview/pulls?state=open&per_page=100")
+    raw = github_command("api", "--hostname", "github.com", "--paginate", "--slurp", "repos/ASBG-PReview/PReview/pulls?state=open&per_page=100")
     pages = json.loads(raw)
     prs = [{"number": item["number"], "title": item["title"], "sha": item["head"]["sha"],
             "imageLabel": "이미지 상태 미확인"} for page in pages for item in page]
@@ -314,7 +345,11 @@ def send_json(handler, status, body):
 
 
 def upstream_result(response, requested_url):
+    # HTTPResponse tracks the effective length, accounting for chunked and bodyless replies.
+    expected = getattr(response, "length", None)
     content = response.read(MAX_RESPONSE + 1)
+    if expected is not None and len(content) < min(expected, MAX_RESPONSE + 1):
+        raise HTTPException(f"응답 본문 전송이 중단됐습니다 ({len(content)}/{expected}바이트).")
     truncated = len(content) > MAX_RESPONSE
     text = content[:MAX_RESPONSE].decode("utf-8", errors="replace")
     body = text

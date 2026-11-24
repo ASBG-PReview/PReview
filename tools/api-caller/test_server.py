@@ -1,4 +1,5 @@
 import http.client
+import io
 import json
 import subprocess
 import threading
@@ -12,6 +13,23 @@ import server
 
 
 class CatalogTest(unittest.TestCase):
+    def test_registry_credentials_are_bound_to_the_first_request(self):
+        sent = []
+        class Response(io.BytesIO):
+            status = 200
+            headers = {"Docker-Content-Digest": "sha256:" + "b" * 64}
+        def registry(request, timeout):
+            sent.append(request)
+            return Response(b'{"token":"fixture"}')
+        pr = {"number": 12, "sha": "a" * 40}
+        with patch.object(server, "urlopen", side_effect=registry), patch.object(server, "github_command", return_value="fixture"):
+            self.assertEqual(server.image_status(pr, server.registry_token()), "이미지 존재")
+            Response.headers = {}
+            self.assertIn("확인 불가", server.image_status(pr, "fixture"))
+        for request in sent:
+            self.assertIn("Authorization", request.unredirected_hdrs)
+            self.assertNotIn("Authorization", request.headers)
+
     def test_cli_output_is_utf8_even_on_korean_windows(self):
         title = "버전 확인 🧪"
         result = subprocess.CompletedProcess([], 0, title.encode("utf-8"), b"")
@@ -36,6 +54,14 @@ class CatalogTest(unittest.TestCase):
 
 class FixtureUpstream(BaseHTTPRequestHandler):
     def do_GET(self):
+        if self.path in ("/container-2/pr-4/version", "/container-2/pr-5/version"):
+            code = 200 if "/pr-4/" in self.path else 204
+            self.send_response(code)
+            self.send_header("Content-Length", "22")
+            self.end_headers()
+            if code == 200:
+                self.wfile.write(b'{"version":"')
+            return
         if self.path == "/container-2/pr-17/version":
             self.send_response(302)
             self.send_header("Location", "/canonical/version")
@@ -117,3 +143,10 @@ class CallerTest(unittest.TestCase):
         self.assertEqual(self.call("0", "health")[0], 400)
         self.assertEqual(self.call("17", "health", isMain="true")[0], 400)
         self.assertEqual(self.call("17", "health", baseUrl="http://localhost:wrong/container-2")[0], 400)
+
+    def test_partial_body_does_not_look_like_a_successful_call(self):
+        status, result = self.call(4, "version")
+        self.assertEqual(status, 200)
+        self.assertFalse(result["ok"])
+        self.assertIn("전송이 중단", result["error"])
+        self.assertTrue(self.call(5, "version")[1]["ok"])
