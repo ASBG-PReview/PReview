@@ -1,19 +1,23 @@
 name: Build PR preview image
+run-name: >-
+  ${{ github.event.action == 'edited' && !github.event.changes.base &&
+  'Skip PR metadata edit' || format('Build PR preview image for PR {0}', github.event.pull_request.number) }}
 on:
   pull_request:
     branches: [main]
-    types: [opened, reopened, synchronize]
+    types: [opened, reopened, synchronize, edited]
 permissions:
   contents: read
 defaults:
   run:
     shell: bash
 concurrency:
-  group: preview-build-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  group: preview-build-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && !github.event.changes.base && format('metadata-{0}', github.run_id) || github.event.pull_request.head.sha }}
   cancel-in-progress: true
 jobs:
   build:
     if: >-
+      (github.event.action != 'edited' || github.event.changes.base != null) &&
       github.event.pull_request.head.repo.id == github.event.repository.id &&
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.actor != 'dependabot[bot]'
@@ -40,24 +44,28 @@ jobs:
             --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             -t preview-build:tested "$RUNNER_TEMP/preview-context"
           test "$(docker image inspect preview-build:tested --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
-      - name: Verify health, PR identity, and version on port 8080
+      - name: Verify both root and shared EKS routes on the exact PR image
         run: |
-          docker run -d --name preview-smoke --cap-drop ALL --security-opt no-new-privileges \
-            -p 127.0.0.1:18080:8080 -e PR_NUMBER -e COMMIT_SHA -e NAMESPACE preview-build:tested
-          health=$(curl -fsS --retry 30 --retry-all-errors --retry-delay 2 --max-time 5 \
-            -o "$RUNNER_TEMP/health.json" -w '%{http_code}' http://127.0.0.1:18080/health)
-          test "$health" = 200
-          jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
-          identity=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/environment.json" \
-            -w '%{http_code}' http://127.0.0.1:18080/environment)
-          test "$identity" = 200
-          jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
-            .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/environment.json"
           expected_version=$(cat preview-api/src/main/version.txt)
           test -n "$expected_version"
-          curl -fsS --max-time 5 -o "$RUNNER_TEMP/version.json" http://127.0.0.1:18080/version
-          jq -es --arg expected "$expected_version" \
-            'length == 1 and .[0].version == $expected' "$RUNNER_TEMP/version.json"
+          for prefix in '' "/container-2/pr-$PR_NUMBER"; do
+            docker run -d --name preview-smoke --cap-drop ALL --security-opt no-new-privileges \
+              -p 127.0.0.1:18080:8080 -e PR_NUMBER -e COMMIT_SHA -e NAMESPACE \
+              -e BASE_PATH="$prefix" preview-build:tested
+            base="http://127.0.0.1:18080$prefix"
+            health=$(curl -fsS --retry 30 --retry-all-errors --retry-delay 2 --max-time 5 \
+              -o "$RUNNER_TEMP/health.json" -w '%{http_code}' "$base/health")
+            test "$health" = 200
+            jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
+            status=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/environment.json" -w '%{http_code}' "$base/environment")
+            test "$status" = 200
+            jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
+              .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/environment.json"
+            version=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/version.json" -w '%{http_code}' "$base/version")
+            test "$version" = 200
+            jq -es --arg expected "$expected_version" 'length == 1 and .[0].version == $expected' "$RUNNER_TEMP/version.json"
+            docker rm -f preview-smoke
+          done
       - name: Remove smoke container
         if: always()
         run: docker rm -f preview-smoke || true

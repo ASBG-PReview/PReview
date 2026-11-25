@@ -34,3 +34,4 @@ if helm template preview-pr-17 charts/preview-api --namespace container-2 \
   echo 'Expected missing digest to fail' >&2; exit 1
 fi
 echo 'Shared namespace chart checks passed'
+ruby tests/applicationset-contract.rb

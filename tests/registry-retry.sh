@@ -17,6 +17,12 @@ cat > "$work/bin/gh" <<'SH'
 #!/usr/bin/env bash
 set -eu
 test "$1 $2" = "attestation verify"
+if [[ "$3" == */main-image-intent.json ]]; then
+  test "$4" = --repo && test "$5" = "$REPOSITORY"
+  test "$6" = --cert-identity && test "$7" = "$GITHUB_SERVER_URL/$REPOSITORY/.github/workflows/ci.yaml@refs/heads/main"
+  test "$8" = --source-ref && test "$9" = refs/heads/main
+  test "${10}" = --source-digest && test "${11}" = "$SHA" && test "${12}" = --deny-self-hosted-runners
+fi
 node -e 'const fs = require("node:fs"); process.exit(fs.readFileSync(process.argv[1]).equals(fs.readFileSync(process.argv[2])) ? 0 : 1)' "$3" "$RUNNER_TEMP/authorized.json"
 SH
 chmod +x "$work/bin/gh"
@@ -41,3 +47,30 @@ if bash "$writer" publish "$work/rebuilt" "$target" "$a"; then exit 1; fi
 skopeo inspect --raw "docker://$target" > "$work/remote.json"
 test "$(skopeo manifest-digest "$work/remote.json")" = "$a"
 printf 'First and recovered digest %s\nRebuilt digest %s\n' "$a" "$b"
+
+# Use a separate tag in the disposable registry for main. Keep the production
+# tag validation and rewrite only the registry address for Skopeo's I/O.
+export SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+export REPOSITORY=example/preview
+export GITHUB_SERVER_URL=https://github.com
+export MAIN_TEST_TAG="ghcr.io/$REPOSITORY:sha-$SHA"
+export LOCAL_MAIN_TAG="${target%:*}:sha-$SHA"
+export REAL_SKOPEO
+REAL_SKOPEO=$(command -v skopeo)
+cat > "$work/bin/skopeo" <<'SH'
+#!/usr/bin/env bash
+args=()
+for arg in "$@"; do
+  if [[ "$arg" == "docker://$MAIN_TEST_TAG" ]]; then arg="docker://$LOCAL_MAIN_TAG"; fi
+  args+=("$arg")
+done
+exec "$REAL_SKOPEO" "${args[@]}"
+SH
+chmod +x "$work/bin/skopeo"
+IMAGE_DIGEST="$a" node scripts/promote-main.mjs intent > "$work/authorized.json"
+test "$(bash "$writer" publish-main "$work/first" "$MAIN_TEST_TAG" "$a")" = "$a"
+test "$(bash "$writer" publish-main "$work/rebuilt" "$MAIN_TEST_TAG" "$b")" = "$a"
+IMAGE_DIGEST="$b" node scripts/promote-main.mjs intent > "$work/authorized.json"
+if bash "$writer" publish-main "$work/rebuilt" "$MAIN_TEST_TAG" "$b"; then exit 1; fi
+skopeo inspect --raw "docker://$LOCAL_MAIN_TAG" > "$work/main-remote.json"
+test "$(skopeo manifest-digest "$work/main-remote.json")" = "$a"

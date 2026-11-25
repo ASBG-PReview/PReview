@@ -11,6 +11,7 @@ jobs:
   prepare:
     if: >-
       github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.display_title != 'Skip PR metadata edit' &&
       github.event.workflow_run.event == 'pull_request' &&
       github.event.workflow_run.path == '.github/workflows/pr-build.yml' &&
       github.event.workflow_run.head_repository.id == github.event.repository.id
@@ -48,9 +49,10 @@ jobs:
           EXPECTED_SHA: ${{ steps.gate.outputs.sha }}
         run: |
           source_image="docker-archive:$RUNNER_TEMP/preview-artifact/preview-image.tar"
-          skopeo inspect --config "$source_image" | jq -e \
-            '.config.Labels["org.opencontainers.image.revision"] == env.EXPECTED_SHA and
-             .config.Labels["org.opencontainers.image.source"] == (env.GITHUB_SERVER_URL + "/" + env.GITHUB_REPOSITORY)'
+          skopeo inspect --config "$source_image" | jq -es \
+            'length == 1 and (.[0] | .os == "linux" and .architecture == "amd64" and
+             .config.Labels["org.opencontainers.image.revision"] == env.EXPECTED_SHA and
+             .config.Labels["org.opencontainers.image.source"] == (env.GITHUB_SERVER_URL + "/" + env.GITHUB_REPOSITORY))'
           digest=$(bash scripts/publish_preview_image.sh prepare "$source_image" "$RUNNER_TEMP/preview-canonical")
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
