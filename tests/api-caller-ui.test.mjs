@@ -107,3 +107,30 @@ test('choosing the empty option clears the PR, response and path while a late re
   assert.equal(field('#resultTarget').textContent, '');
   assert.doesNotMatch(field('#output').textContent, /old response/);
 });
+
+test('the caller reports the actual environment independently of HTTP success and preserves the response', async () => {
+  const {field, fire, select, next} = browser();
+  select('#prNumber', '36', 'input');
+  const env = {prNumber: '36', namespace: 'container-2', commitSha: 'a'.repeat(40)};
+  async function statusFor(endpoint, body, truncated = false, status = 200) {
+    field('api').dataset.endpoint = endpoint;
+    const done = fire('api', 'click');
+    next('/api/call').reply({ok: true, status, body, truncated});
+    await done;
+    assert.equal(field('#output').textContent.includes(typeof body === 'string' ? body : JSON.stringify(body, null, 2)), true);
+    return field('#status').textContent;
+  }
+  assert.match(await statusFor('environment', env), /배포 대상 일치/);
+  assert.match(await statusFor('environment', {...env, prNumber: '37'}), /불일치/);
+  assert.match(await statusFor('environment', {...env, namespace: 'preview-local'}), /불일치/);
+  field('#isMain').checked = true;
+  fire('#isMain', 'change');
+  assert.match(await statusFor('environment', {...env, prNumber: 'main'}), /배포 대상 일치/);
+  assert.match(await statusFor('environment', {prNumber: 'main'}), /예상한 API 응답과 다름/);
+  assert.match(await statusFor('version', '<html>'), /예상한 API 응답과 다름/);
+  assert.match(await statusFor('version', {version: '1.0.3'}), /버전 확인/);
+  assert.match(await statusFor('health', {status: 'ok'}), /상태 정상/);
+  assert.match(await statusFor('health', {status: 'ok'}, false, 206), /예상한 API 응답과 다름/);
+  assert.match(await statusFor('health', {status: 'waiting'}), /예상한 API 응답과 다름/);
+  assert.match(await statusFor('version', 'partial', true), /본문 일부만 수신/);
+});

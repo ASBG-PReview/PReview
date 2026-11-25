@@ -25,6 +25,8 @@ python3 tools/api-caller/server.py
 
 브라우저에서 `http://127.0.0.1:8765`를 열고 main 체크박스 또는 PR 번호를 선택한 뒤 API 버튼을 누릅니다. 서버를 종료하려면 터미널에서 `Ctrl+C`를 누릅니다.
 
+결과에는 HTTP 상태와 응답 본문이 함께 표시됩니다. `/environment`의 ‘배포 대상 일치’는 응답의 PR 번호(또는 `main`)와 네임스페이스 `container-2`가 선택한 환경과 맞다는 뜻입니다. 실제 배포 버전을 확인할 때는 본문의 `commitSha`를 원하는 커밋과 대조합니다. 직접 호출할 때도 로컬 주소에 `Content-Type: application/json`으로 요청합니다.
+
 `PR 목록 및 이미지 새로고침`을 누르면 열려 있는 PR과 각 PR의 최신 커밋에 해당하는 GHCR 이미지 태그를 조회합니다. 목록에서 PR을 선택하면 번호가 입력됩니다. 조회에는 [GitHub CLI](https://cli.github.com/) 설치 및 `gh auth login`이 필요하며, 비공개 저장소와 패키지에는 각각 읽기 권한이 필요합니다. 이미지 존재는 EKS 배포 완료를 의미하지 않으며, 서명이나 이미지 신뢰성 검증도 수행하지 않습니다. 최신 이미지를 확인하지 못해도 PR 번호를 직접 입력해 API를 호출할 수 있습니다.
 
 ## CI와 이미지 발행
@@ -72,6 +74,8 @@ make clean
 ```
 
 `make deploy`는 로컬 Docker 이미지 ID에서 `local-<64자리>` 태그를 만들고 선택한 프로필에 이미지를 로드합니다. 같은 `IMAGE_TAG`로 다시 빌드해도 내용이 달라지면 Pod 이미지가 바뀝니다. `make load`로 이미지 로드만 실행할 수도 있습니다. 배포는 `preview-local` 네임스페이스와 로컬 `quota.yaml`을 준비한 뒤 rollout 완료를 기다립니다. `make test`는 현재 Docker 이미지와 Deployment의 이미지가 일치하는지 확인하고 임시 포트 포워딩(기본 18080)으로 상태·환경·버전을 검증합니다. 배포와 테스트에는 동일한 식별자를 전달합니다(`make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 해당 Helm 릴리스를 삭제합니다. 로컬 Ingress에는 minikube의 nginx ingress 애드온이 필요합니다.
+
+`RELEASE`에 점이 있거나 숫자로 시작하면 차트가 Kubernetes 이름 규칙에 맞는 Service 이름을 생성합니다. 숫자 시작 Service를 허용한 클러스터에서 해당 릴리스를 업그레이드하면 Service 이름과 ClusterIP가 바뀔 수 있습니다. Service DNS를 직접 쓰는 클라이언트가 있으면 `helm template` 출력으로 새 주소를 확인합니다. [Kubernetes 객체 이름 규칙](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/)
 
 아래 명령은 수동 EKS 배포에 사용할 PR 매니페스트를 렌더링합니다. Argo CD가 이미 관리하는 릴리스는 상태 파일로 갱신합니다. 해당 PR의 배포 입력에서 전체 head SHA와 이미지 digest를 읽어 `HEAD_SHA`와 `IMAGE_DIGEST`에 지정하고, 기록된 `chartRevision`을 체크아웃한 깨끗한 작업 트리에서 실행합니다. CI도 이 예제의 실제 인수로 렌더링해 Ingress부터 Service, Pod와 세 probe까지 같은 경로를 쓰는지 검사합니다.
 

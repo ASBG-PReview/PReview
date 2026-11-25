@@ -88,7 +88,11 @@ export function fixture({ prs = [], slots = {}, projections = slots, tickets = {
         }
         if (path.startsWith('/pulls?')) {
           const query = new URLSearchParams(path.split('?')[1]);
-          const rows = [...live.values()].filter(pr => pr.state === query.get('state')).sort((a, b) => b.updated_at.localeCompare(a.updated_at));
+          const rows = [...live.values()].filter(pr => query.get('state') === 'all' || pr.state === query.get('state'));
+          if (query.get('sort') === 'created') {
+            assert.equal(query.get('direction'), 'asc');
+            rows.sort((a, b) => a.number - b.number);
+          } else rows.sort((a, b) => b.updated_at.localeCompare(a.updated_at));
           const offset = (Number(query.get('page')) - 1) * 100;
           return rows.slice(offset, offset + 100);
         }

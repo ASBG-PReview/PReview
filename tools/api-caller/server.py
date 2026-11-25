@@ -210,6 +210,20 @@ HTML = r'''<!doctype html>
     const base = baseInput.value.trim().replace(/\/+$/, '');
     return `${base}/${mainInput.checked ? 'main' : `pr-${prInput.value || '<PR 번호>'}`}`;
   }
+  function callStatus(data, endpoint, expectedPr) {
+    if (!data.status) return '호출 실패';
+    const http = `HTTP ${data.status} · `;
+    if (!data.ok) return http + '실패';
+    if (data.truncated) return http + '본문 일부만 수신';
+    if (data.status !== 200) return http + '예상한 API 응답과 다름';
+    const body = data.body;
+    if (endpoint === 'health' && body?.status === 'ok') return http + '상태 정상';
+    if (endpoint === 'version' && typeof body?.version === 'string' && body.version.trim()) return http + '버전 확인';
+    if (endpoint === 'environment' && [body?.prNumber, body?.namespace, body?.commitSha].every(value => typeof value === 'string' && value.trim())) {
+      return http + (body.prNumber === expectedPr && body.namespace === 'container-2' ? '배포 대상 일치' : '배포 대상 불일치');
+    }
+    return http + '예상한 API 응답과 다름';
+  }
   function refresh() {
     if (activeCall) { activeCall.abort(); activeCall = null; }
     buttons.forEach(item => item.disabled = false);
@@ -246,7 +260,7 @@ HTML = r'''<!doctype html>
       if (data.url) {
         resultTarget.textContent = '요청: ' + data.url + (data.finalUrl && data.finalUrl !== data.url ? ' → 최종 응답: ' + data.finalUrl : '');
       }
-      status.textContent = data.status ? `HTTP ${data.status} · ${data.ok ? '성공' : '실패'}` : (data.ok ? '성공' : '호출 실패');
+      status.textContent = callStatus(data, endpoint, mainInput.checked ? 'main' : prNumber);
       const body = data.body === undefined ? '' : (typeof data.body === 'string' ? data.body : JSON.stringify(data.body, null, 2));
       output.textContent = [data.error, data.truncated ? '본문을 1,000,000바이트까지만 표시합니다.' : '', body].filter(Boolean).join('\n');
     } catch (error) {
@@ -284,7 +298,11 @@ def registry_token():
     request = Request(f"https://ghcr.io/token?{query}", headers={"User-Agent": "PReview-local-api-caller"})
     request.add_unredirected_header("Authorization", f"Basic {auth}")
     with urlopen(request, timeout=15) as response:
-        return json.load(response)["token"]
+        payload = json.load(response)
+        token = payload.get("token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not re.fullmatch(r"[A-Za-z0-9._~+/\-]+=*", token):
+            raise ValueError("GHCR 인증 응답의 토큰 형식을 확인하세요.")
+        return token
 
 
 def image_status(pr, token):
@@ -308,8 +326,18 @@ def image_status(pr, token):
 def list_prs(include_images=True):
     raw = github_command("api", "--hostname", "github.com", "--paginate", "--slurp", "repos/ASBG-PReview/PReview/pulls?state=open&per_page=100")
     pages = json.loads(raw)
-    prs = [{"number": item["number"], "title": item["title"], "sha": item["head"]["sha"],
-            "imageLabel": "이미지 상태 미확인"} for page in pages for item in page]
+    if not isinstance(pages, list) or not pages or not all(isinstance(page, list) for page in pages):
+        raise ValueError("GitHub PR 목록 응답을 확인하세요.")
+    prs = []
+    seen = set()
+    for page in pages:
+        for item in page:
+            number, title, sha = item["number"], item["title"], item["head"]["sha"]
+            if (type(number) is not int or number < 1 or number in seen or not isinstance(title, str)
+                    or not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{40}", sha)):
+                raise ValueError("GitHub PR 번호와 최신 커밋을 확인하세요.")
+            seen.add(number)
+            prs.append({"number": number, "title": title, "sha": sha, "imageLabel": "이미지 상태 미확인"})
     if not include_images or not prs:
         return prs
     try:
@@ -365,7 +393,24 @@ def upstream_result(response, requested_url):
 
 
 class Handler(BaseHTTPRequestHandler):
+    timeout = 15
+
+    def local_request(self):
+        port = self.server.server_port
+        authorities = {f"{host}:{port}" for host in (HOST, "localhost")}
+        if port == 80:
+            authorities.update((HOST, "localhost"))
+        hosts = self.headers.get_all("Host", [])
+        origins = self.headers.get_all("Origin", [])
+        if (len(hosts) == 1 and hosts[0].lower() in authorities
+                and (not origins or (len(origins) == 1 and origins[0].lower() == "http://" + hosts[0].lower()))):
+            return True
+        send_json(self, 403, {"error": "로컬 호출기 주소에서 다시 요청하세요."})
+        return False
+
     def do_GET(self):
+        if not self.local_request():
+            return
         if self.path in ("/api/prs", "/api/prs?images=0"):
             try:
                 return send_json(self, 200, {"prs": list_prs(include_images=self.path == "/api/prs")})
@@ -381,15 +426,22 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_POST(self):
-        if self.path != "/api/call":
-            return send_json(self, 404, {"error": "Not found"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if length < 1:
                 return send_json(self, 400, {"error": "요청 데이터를 확인하세요."})
             if length > 16_384:
                 return send_json(self, 413, {"error": "Request too large"})
-            values = json.loads(self.rfile.read(length))
+            payload = self.rfile.read(length)
+            if not self.local_request():
+                return
+            if self.path != "/api/call":
+                return send_json(self, 404, {"error": "Not found"})
+            if self.headers.get_content_type() != "application/json":
+                return send_json(self, 415, {"error": "application/json 형식으로 요청하세요."})
+            if len(payload) != length:
+                return send_json(self, 400, {"error": "요청 본문 전송이 중단됐습니다."})
+            values = json.loads(payload)
             if not isinstance(values, dict) or not isinstance(values.get("baseUrl"), str):
                 return send_json(self, 400, {"error": "고정 주소와 API를 지정하세요."})
             endpoint = values.get("endpoint")
@@ -434,6 +486,8 @@ class Handler(BaseHTTPRequestHandler):
             return send_json(self, 200, result)
         except (ValueError, TypeError, RecursionError):
             return send_json(self, 400, {"error": "요청 데이터를 확인하세요."})
+        except TimeoutError:
+            return send_json(self, 408, {"error": "요청 데이터를 기다리는 시간이 초과됐습니다."})
 
     def log_message(self, fmt, *args):
         print(f"[{self.log_date_time_string()}] {fmt % args}")

@@ -19,6 +19,7 @@ export const graceMs = 24 * 60 * 60 * 1000;
 export const slotPath = n => `previews/pr-${n}/state.json`;
 export const projectionPath = n => `deployments/pr-${n}/state.json`;
 export const ticketPath = n => `cleanup/pr-${n}.json`;
+export const pendingPath = n => `control/retiring-pr-${n}.json`;
 export const cursorPath = 'control/closed-sweep.json';
 const safeNumber = n => Number.isSafeInteger(n) && n > 0;
 export const isSha = value => typeof value === 'string' && /^[a-f0-9]{40}$/.test(value);
@@ -40,8 +41,9 @@ export function isTimestamp(value) {
   const time = Date.parse(value);
   return Number.isFinite(time) && new Date(time).toISOString() === (value.includes('.') ? value : value.replace('Z', '.000Z'));
 }
-export function checkedTicket(value, number) {
-  if (value?.prNumber !== String(number) || !isTimestamp(value.closedAt) || !isTimestamp(value.retiredAt) ||
+export function checkedTicket(value, number, pending = false) {
+  if (value?.prNumber !== String(number) || !isTimestamp(value.closedAt) ||
+    (pending ? value.retiredAt !== null || value.previous == null : !isTimestamp(value.retiredAt)) ||
     !['closed', 'retargeted'].includes(value.reason) || !Object.hasOwn(value, 'previous')) {
     throw new Error('Invalid cleanup ticket for PR #' + number);
   }
@@ -51,7 +53,7 @@ export function checkedTicket(value, number) {
 export function inGrace(ticket, now) {
   // A previous closure may be discovered much later during an outage. Give
   // Argo the full grace period after the desired state was actually removed.
-  return now < Math.max(Date.parse(ticket.closedAt), Date.parse(ticket.retiredAt)) + graceMs;
+  return ticket.retiredAt === null || now < Math.max(Date.parse(ticket.closedAt), Date.parse(ticket.retiredAt)) + graceMs;
 }
 export function readBlob(publisher, sha) {
   const result = publisher.api('/git/blobs/' + sha);
@@ -65,13 +67,14 @@ function blobId(content) {
 export function inventory(publisher, revision = stateBranch) {
   const result = publisher.api('/git/trees/' + revision + '?recursive=1');
   if (result.truncated !== false || !Array.isArray(result.tree)) throw new Error('Incomplete state tree');
-  const files = new Map(), slots = new Set(), projections = new Set(), tickets = new Set(), unknown = [], unsafe = new Set();
+  const files = new Map(), slots = new Set(), projections = new Set(), tickets = new Set(), pending = new Set(), unknown = [], unsafe = new Set();
   for (const entry of result.tree) {
     if (typeof entry.path !== 'string') throw new Error('Invalid state tree path');
     if (!/^(?:previews|deployments|cleanup|control)\//.test(entry.path)) continue;
     const match = /^(previews|deployments)\/pr-([1-9][0-9]*)\/state\.json$/.exec(entry.path);
     const ticket = /^cleanup\/pr-([1-9][0-9]*)\.json$/.exec(entry.path);
-    if (!match && !ticket && entry.path !== cursorPath) {
+    const marker = /^control\/retiring-pr-([1-9][0-9]*)\.json$/.exec(entry.path);
+    if (!match && !ticket && !marker && entry.path !== cursorPath) {
       if (/^(?:previews|deployments)\/.*\/state\.json$/.test(entry.path)) unknown.push(entry.path);
       continue;
     }
@@ -81,13 +84,19 @@ export function inventory(publisher, revision = stateBranch) {
       unknown.push(entry.path);
     }
     files.set(entry.path, entry.sha);
-    if (match || ticket) {
-      const number = Number(match ? match[2] : ticket[1]);
+    if (match || ticket || marker) {
+      const number = Number(match ? match[2] : (ticket || marker)[1]);
       if (!safeNumber(number)) { unknown.push(entry.path); continue; }
-      (ticket ? tickets : match[1] === 'previews' ? slots : projections).add(number);
+      (marker ? pending : ticket ? tickets : match[1] === 'previews' ? slots : projections).add(number);
     }
   }
-  return { files, slots, projections, tickets, unknown, unsafe };
+  for (const n of pending) {
+    if (!tickets.has(n) || slots.has(n) || projections.has(n)) {
+      unsafe.add(pendingPath(n));
+      unknown.push(pendingPath(n));
+    }
+  }
+  return { files, slots, projections, tickets, pending, unknown, unsafe };
 }
 
 // A fast-forward ref update publishes all file changes together. If a competing
@@ -186,7 +195,7 @@ export function assertProjection(store, allowed, now = Date.now()) {
     }
   }
   for (const n of store.tickets) {
-    const ticket = checkedTicket(store.read(ticketPath(n)), n);
+    const ticket = checkedTicket(store.read(ticketPath(n)), n, store.pending.has(n));
     if (inGrace(ticket, now)) verifyPin(pinnedState(ticket.previous), n);
   }
 }

@@ -51,6 +51,25 @@ class CatalogTest(unittest.TestCase):
             auth.assert_not_called()
             self.assertIn("403", server.list_prs()[0]["imageLabel"])
 
+    def test_malformed_registry_reply_preserves_valid_pr_list(self):
+        raw = json.dumps([[{"number": 9, "title": "제목", "head": {"sha": "a" * 40}}]])
+        for reply in (b'null', b'{}', b'{"token":""}', b'{"token":1}', b'{"token":"a b"}', '{"token":"한글"}'.encode()):
+            with self.subTest(reply=reply), patch.object(server, "github_command", return_value=raw), \
+                    patch.object(server, "urlopen", return_value=io.BytesIO(reply)) as fetch:
+                result, = server.list_prs()
+                self.assertEqual(result["number"], 9)
+                self.assertIn("인증 정보 조회 오류", result["imageLabel"])
+                fetch.assert_called_once()
+
+    def test_incomplete_or_inconsistent_catalog_is_never_displayed_as_current(self):
+        pr = {"number": 7, "title": "변경", "head": {"sha": "a" * 40}}
+        for pages in ({}, [], [{}], [[pr], [pr]], [[{**pr, "number": True}]], [[{**pr, "head": {"sha": "short"}}]]):
+            with self.subTest(pages=pages), patch.object(server, "github_command", return_value=json.dumps(pages)), \
+                    patch.object(server, "registry_token") as auth:
+                with self.assertRaises(ValueError):
+                    server.list_prs()
+                auth.assert_not_called()
+
 
 class FixtureUpstream(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -105,10 +124,10 @@ class CallerTest(unittest.TestCase):
         cls.upstream = start(FixtureUpstream)
         cls.caller = start(QuietCaller)
 
-    def request(self, body):
+    def request(self, body, **headers):
         conn = http.client.HTTPConnection("127.0.0.1", self.caller, timeout=5)
         try:
-            conn.request("POST", "/api/call", json.dumps(body), {"Content-Type": "application/json"})
+            conn.request("POST", "/api/call", json.dumps(body), {"Content-Type": "application/json", **headers})
             response = conn.getresponse()
             return response.status, json.loads(response.read())
         finally:
@@ -143,6 +162,13 @@ class CallerTest(unittest.TestCase):
         self.assertEqual(self.call("0", "health")[0], 400)
         self.assertEqual(self.call("17", "health", isMain="true")[0], 400)
         self.assertEqual(self.call("17", "health", baseUrl="http://localhost:wrong/container-2")[0], 400)
+
+    def test_local_caller_accepts_only_its_own_origin_and_json(self):
+        authority = f"localhost:{self.caller}"
+        self.assertEqual(self.request({}, Host=authority, Origin="http://" + authority)[0], 400)
+        self.assertEqual(self.request({}, Host=authority, Origin="https://example.invalid")[0], 403)
+        self.assertEqual(self.request({}, Host="example.invalid")[0], 403)
+        self.assertEqual(self.request({}, **{"Content-Type": "text/plain"})[0], 415)
 
     def test_partial_body_does_not_look_like_a_successful_call(self):
         status, result = self.call(4, "version")

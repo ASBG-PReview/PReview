@@ -42,10 +42,11 @@ jobs:
           set -euo pipefail
           export REGISTRY_AUTH_FILE="$RUNNER_TEMP/plan-auth.json"
           trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
-          node scripts/reconcile-preview-state.mjs "$REPOSITORY" --list-cleanup > "$RUNNER_TEMP/tickets.json"
+          args=("$REPOSITORY" --list-cleanup)
+          if [[ -n "$PR_NUMBER" ]]; then args+=("$PR_NUMBER"); fi
+          node scripts/reconcile-preview-state.mjs "${args[@]}" > "$RUNNER_TEMP/tickets.json"
           cat "$RUNNER_TEMP/tickets.json"
-          if [[ -n "$PR_NUMBER" && ! "$PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then exit 2; fi
-          jq -r --arg pr "$PR_NUMBER" '.[] | select($pr == "" or (.prNumber|tostring) == $pr) | .prNumber' "$RUNNER_TEMP/tickets.json" > "$RUNNER_TEMP/eligible.txt"
+          jq -r '.[].prNumber' "$RUNNER_TEMP/tickets.json" > "$RUNNER_TEMP/eligible.txt"
           mapfile -t numbers < "$RUNNER_TEMP/eligible.txt"
           if (( ${#numbers[@]} == 0 )); then echo "현재 보존 기간을 지난 정리 요청이 없습니다."; fi
           if (( ${#numbers[@]} )); then
@@ -134,8 +135,10 @@ jobs:
           REQUESTED_PR: ${{ inputs.cleanup_pr }}
         run: |
           set -euo pipefail
-          node scripts/reconcile-preview-state.mjs "$GITHUB_REPOSITORY" --list-cleanup > "$RUNNER_TEMP/tickets.json"
-          jq -r --arg pr "$REQUESTED_PR" '.[] | select($pr == "" or (.prNumber|tostring) == $pr) | [.prNumber, .ticketSha] | @tsv' "$RUNNER_TEMP/tickets.json" > "$RUNNER_TEMP/tickets.tsv"
+          args=("$GITHUB_REPOSITORY" --list-cleanup)
+          if [[ -n "$REQUESTED_PR" ]]; then args+=("$REQUESTED_PR"); fi
+          node scripts/reconcile-preview-state.mjs "${args[@]}" > "$RUNNER_TEMP/tickets.json"
+          jq -r '.[] | [.prNumber, .ticketSha] | @tsv' "$RUNNER_TEMP/tickets.json" > "$RUNNER_TEMP/tickets.tsv"
           if [[ -s "$RUNNER_TEMP/tickets.tsv" ]]; then echo 'pending=true' >> "$GITHUB_OUTPUT"; fi
       - id: writer
         if: steps.tickets.outputs.pending == 'true'
@@ -144,36 +147,24 @@ jobs:
           approved-rulesets: ${{ vars.PREVIEW_APPROVED_RULESETS }}
           app-id: ${{ vars.PREVIEW_WRITER_APP_ID }}
           private-key: ${{ secrets.PREVIEW_WRITER_PRIVATE_KEY }}
-      - name: 전용 이미지 회수
+      - name: 전용 이미지 회수 및 티켓별 완료 기록
         if: steps.tickets.outputs.pending == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/cleanup-auth.json"
-          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
-          : > "$RUNNER_TEMP/completed.tsv"
-          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
-          failed=0
-          while IFS=$'\t' read -r pr ticket; do
-            if PREVIEW_CLEANUP_TICKET="$ticket" node scripts/cleanup-preview-images.mjs "$GITHUB_REPOSITORY" "$pr" --apply; then
-              printf '%s\t%s\n' "$pr" "$ticket" >> "$RUNNER_TEMP/completed.tsv"
-            else
-              result=$?
-              if [[ "$result" != 75 ]]; then failed=1; fi
-            fi
-          done < "$RUNNER_TEMP/tickets.tsv"
-          exit "$failed"
-      - name: 회수가 끝난 종료 요청 기록
-        if: ${{ !cancelled() && steps.writer.outcome == 'success' }}
         env:
           GH_TOKEN: ${{ github.token }}
           PREVIEW_STATE_TOKEN: ${{ steps.writer.outputs.token }}
         run: |
           set -euo pipefail
-          if [[ ! -s "$RUNNER_TEMP/completed.tsv" ]]; then exit 0; fi
+          export -n PREVIEW_STATE_TOKEN
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/cleanup-auth.json"
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
           failed=0
           while IFS=$'\t' read -r pr ticket; do
-            node scripts/reconcile-preview-state.mjs "$GITHUB_REPOSITORY" --ack-cleanup "$pr" "$ticket" || failed=1
-          done < "$RUNNER_TEMP/completed.tsv"
+            if PREVIEW_CLEANUP_TICKET="$ticket" node scripts/cleanup-preview-images.mjs "$GITHUB_REPOSITORY" "$pr" --apply; then
+              PREVIEW_STATE_TOKEN="$PREVIEW_STATE_TOKEN" node scripts/reconcile-preview-state.mjs "$GITHUB_REPOSITORY" --ack-cleanup "$pr" "$ticket" || failed=1
+            else
+              result=$?
+              if [[ "$result" != 75 ]]; then failed=1; fi
+            fi
+          done < "$RUNNER_TEMP/tickets.tsv"
           exit "$failed"

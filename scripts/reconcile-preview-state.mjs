@@ -5,7 +5,7 @@ import { Publisher, currentPR } from './preview-publish.mjs';
 import { approvedCharts, verifiedChart } from './preview-chart-policy.mjs';
 import {
   InvalidState, StateStore, inventory, pinnedState, inGrace, checkedState, checkedTicket,
-  slotPath, projectionPath, ticketPath, cursorPath, isSha, isDigest, isTimestamp, readBlob, assertProjection
+  slotPath, projectionPath, ticketPath, pendingPath, cursorPath, isSha, isDigest, isTimestamp, readBlob, assertProjection
 } from './preview-state-store.mjs';
 
 export function slotLimit(value) {
@@ -29,9 +29,10 @@ export function readState(publisher, number, fileSha) {
 
 // A discrepancy is sufficient reason to defer registry deletion. Legacy
 // single-copy inputs are retained while migrating to the new projection.
-export function protectedStateDigests(publisher, { now = Date.now() } = {}) {
-  const { files, slots, projections, tickets, unknown } = inventory(publisher);
+export function protectedStateDigests(publisher, { now = Date.now(), retiringNumber } = {}) {
+  const { files, slots, projections, tickets, pending, unknown } = inventory(publisher);
   if (unknown.length) throw new Error('Unexpected watched paths');
+  if (slots.has(retiringNumber) || projections.has(retiringNumber)) throw new Error('Preview state still exists; retry after reconciliation');
   const roots = new Set();
   for (const n of new Set([...slots, ...projections])) {
     const raw = files.has(slotPath(n)) && readState(publisher, n, files.get(slotPath(n)));
@@ -43,17 +44,18 @@ export function protectedStateDigests(publisher, { now = Date.now() } = {}) {
     roots.add((deployed || raw).imageDigest);
   }
   for (const n of tickets) {
-    const ticket = checkedTicket(readBlob(publisher, files.get(ticketPath(n))), n);
+    const ticket = checkedTicket(readBlob(publisher, files.get(ticketPath(n))), n, pending.has(n));
     if (ticket.previous && inGrace(ticket, now)) roots.add(ticket.previous.imageDigest);
   }
   return roots;
 }
-export function listCleanup(publisher, { now = Date.now() } = {}) {
-  const { files, tickets, slots, projections, unknown } = inventory(publisher);
+export function listCleanup(publisher, { now = Date.now(), number } = {}) {
+  const { files, tickets, pending, slots, projections, unknown } = inventory(publisher);
   if (unknown.length) throw new Error('Unexpected state paths; cleanup deferred');
   const ready = [];
-  for (const n of tickets) {
-    if (slots.has(n) || projections.has(n)) continue;
+  for (const n of number === undefined ? tickets : [number]) {
+    if (!tickets.has(n)) continue;
+    if (slots.has(n) || projections.has(n) || pending.has(n)) continue;
     const ticketSha = files.get(ticketPath(n));
     const ticket = checkedTicket(readBlob(publisher, ticketSha), n);
     if (ticket.reason === 'closed' && !inGrace(ticket, now)) {
@@ -72,7 +74,7 @@ export function acknowledge(publisher, n, expectedSha) {
   const sha = store.files.get(ticketPath(n));
   if (!sha) return;
   if (sha !== expectedSha) throw new Error('Cleanup ticket was replaced; retry the new ticket');
-  const ticket = checkedTicket(store.read(ticketPath(n)), n);
+  const ticket = checkedTicket(store.read(ticketPath(n)), n, store.pending.has(n));
   const live = livePR(publisher, n);
   if (ticket.reason !== 'closed' || inGrace(ticket, Date.now()) || live.state !== 'closed' ||
     Date.parse(live.closed_at) !== Date.parse(ticket.closedAt) || store.files.has(slotPath(n)) || store.files.has(projectionPath(n))) {
@@ -123,23 +125,36 @@ function closedSince(publisher, cursor, now) {
   // Checkpoint at least daily even when the only activity is editing old PRs.
   // This bounds historical pages without a Git commit on every scheduled run.
   let through = Math.max(lower, Math.floor(upper / 86_400_000) * 86_400_000);
+  function inspect(rows, includeOpen = false) {
+    if (!Array.isArray(rows)) throw new Error('Incomplete closed PR list');
+    for (const pr of rows) {
+      if (!validNumber(pr?.number) || !isTimestamp(pr.updated_at)) throw new Error('Invalid PR in closure scan');
+      if (includeOpen && pr.state === 'open') continue;
+      if (pr.state !== 'closed' || !isTimestamp(pr.closed_at)) throw new Error('Invalid closed PR list');
+      const at = Date.parse(pr.closed_at);
+      if (at > lower && at <= upper) { numbers.add(pr.number); through = Math.max(through, at); }
+    }
+  }
   if (upper > lower) {
-    for (let page = 1; ; page++) {
-      const rows = publisher.api('/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=' + page);
-      if (!Array.isArray(rows)) throw new Error('Incomplete closed PR list');
-      for (const pr of rows) {
-        if (!validNumber(pr.number) || !isTimestamp(pr.closed_at) || !isTimestamp(pr.updated_at)) throw new Error('Invalid closed PR list');
-        const at = Date.parse(pr.closed_at);
-        if (at > lower && at <= upper) { numbers.add(pr.number); through = Math.max(through, at); }
+    const recent = publisher.api('/pulls?state=closed&sort=updated&direction=desc&per_page=100&page=1');
+    inspect(recent);
+    // A comment moves a closed PR forward and a reopen removes it from
+    // this list. Offsets in later pages could therefore skip a closure.
+    // Only a busy window needs the stable, oldest-first all-PR traversal.
+    if (recent.length === 100 && Date.parse(recent.at(-1).updated_at) > lower) {
+      for (let page = 1; ; page++) {
+        const rows = publisher.api('/pulls?state=all&sort=created&direction=asc&per_page=100&page=' + page);
+        inspect(rows, true);
+        if (rows.length < 100) break;
       }
-      if (rows.length < 100 || Date.parse(rows.at(-1).updated_at) < lower) break;
     }
   }
   return { numbers: [...numbers], through: new Date(through).toISOString() };
 }
 
 export function reconcile(publisher, log = console.log, options = {}) {
-  const now = options.now ?? Date.now();
+  const clock = options.clock ?? (() => options.now ?? Date.now());
+  const now = clock();
   const maxPreviews = slotLimit(options.maxSlots);
   const repo = publisher.api('');
   if (!validNumber(repo?.id) || typeof repo.default_branch !== 'string' || !repo.default_branch ||
@@ -159,6 +174,14 @@ export function reconcile(publisher, log = console.log, options = {}) {
     catch (error) { allowed = []; failures++; log('Chart approval is invalid: ' + error.message); }
   }
   const canRestore = state => !state?.chartRevision || !allowed || allowed.includes(state.chartRevision);
+  // The initial retirement commit also removes the slot. Only a subsequent
+  // observation of that commit can start the full rollback window.
+  function confirmRetirement(n, ticket) {
+    if (ticket.retiredAt !== null) return ticket;
+    const confirmed = { ...ticket, retiredAt: new Date(clock()).toISOString() };
+    store.change('PR #' + n + ' 프리뷰 회수 시각 확인', { [ticketPath(n)]: confirmed, [pendingPath(n)]: null });
+    return confirmed;
+  }
   function problem(n, message) { failures++; log(`PR #${n}: ${message}`); }
   function refresh(n) {
     try { return livePR(publisher, n); }
@@ -173,13 +196,20 @@ export function reconcile(publisher, log = console.log, options = {}) {
   let chart = options.chartRevision;
   for (const n of numbers) {
     const hasSlot = occupied.has(n);
-    if ([slotPath(n), projectionPath(n), ticketPath(n)].some(path => store.unsafe?.has(path))) {
+    if ([slotPath(n), projectionPath(n), ticketPath(n), pendingPath(n)].some(path => store.unsafe?.has(path))) {
       problem(n, 'unsafe Git entry; retained until repaired');
       continue;
     }
-    // A closed ticket is durable until GC acknowledges it. Avoid one live GET
-    // per old ticket unless the open snapshot or a fresh event indicates change.
-    if (!hasSlot && store.tickets.has(n) && !open.has(n) && !discovered.has(n)) continue;
+    // Only interrupted retirements need a blob read when no PR state changed.
+    const dormant = !hasSlot && store.tickets.has(n) && !open.has(n) && !discovered.has(n);
+    if (dormant && !store.pending.has(n)) continue;
+    let ticket;
+    if (store.files.has(ticketPath(n))) {
+      try { ticket = checkedTicket(store.read(ticketPath(n)), n, store.pending.has(n)); }
+      catch (error) { problem(n, error.message); continue; }
+      if (!hasSlot) ticket = confirmRetirement(n, ticket);
+    }
+    if (dormant) continue;
     if (!hasSlot && !discovered.has(n) && !store.tickets.has(n) && occupied.size >= maxPreviews) {
       log('PR #' + n + ' waiting for a preview slot');
       continue;
@@ -207,11 +237,6 @@ export function reconcile(publisher, log = console.log, options = {}) {
       catch (error) { problem(n, 'previous projection unavailable: ' + error.message); }
     }
     previous = pinnedState(previous);
-    let ticket;
-    if (store.files.has(ticketPath(n))) {
-      try { ticket = checkedTicket(store.read(ticketPath(n)), n); }
-      catch (error) { problem(n, error.message); continue; }
-    }
     const writeActive = value => store.change('PR #' + n + ' 검증된 프리뷰 상태 기록', {
       [slotPath(n)]: value, [projectionPath(n)]: value, [ticketPath(n)]: null,
     });
@@ -227,14 +252,16 @@ export function reconcile(publisher, log = console.log, options = {}) {
       const confirm = refresh(n);
       if (!confirm || confirm.state !== pr.state || targetsMain(confirm, repo) !== inScope) continue;
       const reason = pr.state === 'closed' ? 'closed' : 'retargeted';
-      const closedAt = reason === 'closed' ? confirm.closed_at : ticket?.closedAt || new Date(now).toISOString();
+      const closedAt = reason === 'closed' ? confirm.closed_at : ticket?.closedAt || new Date(clock()).toISOString();
       if (!isTimestamp(closedAt)) { problem(n, 'invalid closure timestamp'); continue; }
       if (!ticket || ticket.reason !== reason || ticket.closedAt !== closedAt || hasSlot) {
-        const retained = previous || (ticket && inGrace(ticket, now) ? ticket.previous : null);
-        ticket = { prNumber: String(n), reason, closedAt, retiredAt: new Date(now).toISOString(), previous: retained };
+        const retained = previous || (ticket && inGrace(ticket, clock()) ? ticket.previous : null);
+        ticket = { prNumber: String(n), reason, closedAt, retiredAt: hasSlot ? null : new Date(clock()).toISOString(), previous: retained };
         store.change('PR #' + n + ' 프리뷰 종료 및 이미지 정리 예약', {
           [slotPath(n)]: null, [projectionPath(n)]: null, [ticketPath(n)]: ticket,
+          [pendingPath(n)]: hasSlot ? true : null,
         });
+        confirmRetirement(n, ticket);
       }
       occupied.delete(n);
       covered.add(n);
@@ -259,14 +286,14 @@ export function reconcile(publisher, log = console.log, options = {}) {
         log('Recovered or migrated verified state for PR #' + n);
       }
     }
-    if (!hasSlot && ticket && (!ticket.previous || !inGrace(ticket, now))) {
+    if (!hasSlot && ticket && (!ticket.previous || !inGrace(ticket, clock()))) {
       store.change('다시 열린 PR #' + n + ' 이미지 정리 취소', { [ticketPath(n)]: null });
     }
     if (!hasSlot && (store.unknown.length || occupied.size >= maxPreviews)) {
       log('PR #' + n + ' waiting for a preview slot');
       continue;
     }
-    if (!hasSlot && ticket?.previous && inGrace(ticket, now)) {
+    if (!hasSlot && ticket?.previous && inGrace(ticket, clock())) {
       if (ticket.reason === 'closed' && canRestore(ticket.previous)) {
         const confirm = refresh(n);
         if (!confirm || confirm.state !== 'open' || !targetsMain(confirm, repo)) continue;
@@ -346,11 +373,13 @@ class StatePublisher extends Publisher {
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   const [repository, mode, arg, sha, ...extra] = process.argv.slice(2);
   const publisher = new StatePublisher(repository);
-  if (mode === '--list-cleanup' && !arg) console.log(JSON.stringify(listCleanup(publisher)));
-  else if (mode === '--check-projection' && !arg) assertProjection(new StateStore(publisher), approvedCharts(process.env.PREVIEW_CHART_REVISIONS));
-  else if (mode === '--ack-cleanup' && !extra.length) acknowledge(publisher, Number(arg), sha);
-  else if ((!mode || (mode === '--closed-pr' && /^[1-9]\d*$/.test(arg) && validNumber(Number(arg)))) && !sha) {
-    if (await reconcileWithRetry(publisher, { closedPr: arg && Number(arg), maxSlots: process.env.PREVIEW_MAX_SLOTS,
+  const number = /^[1-9]\d*$/.test(arg) && validNumber(Number(arg)) ? Number(arg) : undefined;
+  if (mode === '--list-cleanup' && sha === undefined && (arg === undefined || number)) {
+    console.log(JSON.stringify(listCleanup(publisher, { number })));
+  } else if (mode === '--check-projection' && arg === undefined) assertProjection(new StateStore(publisher), approvedCharts(process.env.PREVIEW_CHART_REVISIONS));
+  else if (mode === '--ack-cleanup' && number && !extra.length) acknowledge(publisher, number, sha);
+  else if (mode === undefined || (mode === '--closed-pr' && number && sha === undefined)) {
+    if (await reconcileWithRetry(publisher, { closedPr: number, maxSlots: process.env.PREVIEW_MAX_SLOTS,
       chartConfig: process.env.PREVIEW_CHART_REVISIONS ?? '', registryUnavailable: process.env.PREVIEW_REGISTRY_UNAVAILABLE === '1' })) process.exitCode = 1;
-  } else throw new Error('Usage: OWNER/REPO [--closed-pr N | --list-cleanup | --ack-cleanup N TICKET_SHA | --check-projection]');
+  } else throw new Error('Usage: OWNER/REPO [--closed-pr N | --list-cleanup [N] | --ack-cleanup N TICKET_SHA | --check-projection]');
 }

@@ -26,7 +26,8 @@ class LocalPreviewTest(unittest.TestCase):
         tag = "local-" + "a" * 64
         name = "r" * 53 + "-preview-a"
         resource = {"items": [{"metadata": {"name": name, "uid": "one", "generation": 2}, "spec": {"template": {"spec": {
-            "containers": [{"name": "preview-api", "image": "preview-api:" + tag}]}}}}]}
+            "containers": [{"name": "preview-api", "image": "preview-api:" + tag,
+                            "env": [{"name": key, "value": env[key]} for key in ("PR_NUMBER", "COMMIT_SHA")]}]}}}}]}
         outputs = [image_id, "kind: Namespace", "namespace/sample", json.dumps(resource), json.dumps(resource)]
         with patch.dict(os.environ, env), patch.object(local, "output", side_effect=outputs) as reads, \
                 patch.object(local.subprocess, "run") as run:
@@ -48,6 +49,12 @@ class LocalPreviewTest(unittest.TestCase):
         with patch.dict(os.environ, env), patch.object(local, "output", side_effect=outputs), \
                 patch.object(local.subprocess, "run"), self.assertRaisesRegex(RuntimeError, "Deployment changed"):
             local.main("deploy")
+
+        for key in ("PR_NUMBER", "COMMIT_SHA"):
+            with self.subTest(key=key), patch.dict(os.environ, {**env, key: "different"}), \
+                    patch.object(local, "output", side_effect=outputs), patch.object(local.subprocess, "run"), \
+                    self.assertRaisesRegex(ValueError, "Deployment " + key):
+                local.main("deploy")
 
     def test_smoke_rejects_wrong_payload_even_in_optimized_python(self):
         with patch.object(local, "output", return_value='{"status":"wrong"}'):

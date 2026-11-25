@@ -57,9 +57,9 @@ function fixture({ initialSha = older, subject = 'Deploy main ' + older, missing
   }
   return { api, calls, hook, get ref() { return ref; },
     moveMain(value) { main = value; },
-    operatorUpdate(message) {
+    operatorUpdate(message, tree = 'restored-tree') {
       ref = idOf([message, ref]);
-      commits.set(ref, { message, tree: { sha: 'restored-tree' } });
+      commits.set(ref, { message, tree: { sha: tree } });
       return ref;
     },
     writes: () => calls.filter(c => c.method !== 'GET' && c.path.startsWith('refs')),
@@ -122,6 +122,23 @@ test('older English subjects and pre-existing resume approvals remain readable',
     assert.equal(await promoteMain(f.api, identity), f.ref);
     assert.equal(f.writes().length, 1);
   }
+});
+
+test('resuming an already restored tree clears the hold for the next main release', async () => {
+  const f = fixture();
+  await promoteMain(f.api, identity);
+  const tree = f.calls.find(c => c.method === 'POST' && c.path === 'commits').body.tree;
+  const hold = f.operatorUpdate('수동 복구 완료', tree);
+  await assert.rejects(promoteMain(f.api, identity), /hold/);
+  assert.equal(f.ref, hold);
+
+  const resume = f.operatorUpdate(`main 배포 재개 ${sha} ${identity.digest}`, tree);
+  const promoted = await promoteMain(f.api, identity);
+  assert.notEqual(promoted, resume);
+  assert.equal(await promoteMain(f.api, identity), promoted);
+  f.moveMain(older);
+  assert.notEqual(await promoteMain(f.api, { ...identity, sha: older }), promoted);
+  assert.equal(f.writes().length, 3);
 });
 
 test('concurrent operator recovery wins the fast-forward race', async () => {

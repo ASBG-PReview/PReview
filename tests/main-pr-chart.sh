@@ -52,6 +52,26 @@ helm template preview-local charts/preview-api -f charts/preview-api/values-loca
   --set rollingUpdate.maxSurge=1,rollingUpdate.maxUnavailable=0 --show-only templates/deployment.yaml | \
   ruby -ryaml -e 'policy = YAML.load(STDIN.read).dig("spec", "strategy", "rollingUpdate")
     raise "rollout policy" unless policy == {"maxSurge"=>1, "maxUnavailable"=>0}'
+ruby -ryaml -ropen3 <<'RUBY'
+ordinary = ["true", "null", "team-api", "r" * 53]
+special = ["team.api", "7team", "7" * 52 + "a", "7" * 52 + "b"]
+names = (ordinary + special).map do |release|
+  text, err, status = Open3.capture3("helm", "template", release, "charts/preview-api", "-f", "charts/preview-api/values-local.yaml")
+  raise err unless status.success?
+  objects = YAML.load_stream(text).compact.to_h { |item| [item.fetch("kind"), item] }
+  service, deployment, ingress = objects.values_at("Service", "Deployment", "Ingress")
+  name = service.dig("metadata", "name")
+  raise "invalid Service name for #{release}" unless name.size <= 63 && name.match?(/\A[a-z](?:[a-z0-9-]*[a-z0-9])?\z/)
+  old_name = (release + "-preview-api")[0,63]
+  raise "changed existing Service name" if ordinary.include?(release) && name != old_name
+  raise "changed workload name" unless [deployment, ingress].all? { |item| item.dig("metadata","name") == old_name }
+  raise "wrong Ingress backend" unless ingress.dig("spec","rules",0,"http","paths",0,"backend","service","name") == name
+  selectors = [service.dig("spec","selector"), deployment.dig("spec","selector","matchLabels"), deployment.dig("spec","template","metadata","labels")]
+  raise "release selector changed" unless selectors.uniq.size == 1 && selectors.first.fetch("app.kubernetes.io/instance") == release
+  name
+end
+raise "distinct releases share a Service" unless names.uniq == names
+RUBY
 if helm template preview-pr-17 charts/preview-api --set-string preview.prNumber=main --set-string "preview.commitSha=$sha" --set-string "image.digest=$digest" >/dev/null 2>&1; then
  echo 'PR validation weakened' >&2; exit 1
 fi

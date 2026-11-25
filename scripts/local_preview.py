@@ -100,9 +100,15 @@ def main(mode):
 
     deployment = resource(ns_kube, "deployment", release)
     containers = deployment["spec"]["template"]["spec"]["containers"]
-    images = [container["image"] for container in containers if container["name"] == "preview-api"]
+    app = [container for container in containers if container["name"] == "preview-api"]
+    images = [container["image"] for container in app]
     if images != [reference]:
         raise ValueError(f"Deployment image {images} does not match local build {reference}")
+    # Another upgrade may have finished before our first read using the same image.
+    values = {entry["name"]: entry.get("value", "") for entry in app[0].get("env", []) if "valueFrom" not in entry}
+    for key in ("PR_NUMBER", "COMMIT_SHA"):
+        if values.get(key) != os.environ[key]:
+            raise ValueError(f"Deployment {key} does not match the requested value")
     name = deployment["metadata"]["name"]
     subprocess.run([*ns_kube, "rollout", "status", f"deployment/{name}", "--timeout=180s"], check=True)
     # rollout status follows newer revisions when a deployment changes mid-check.

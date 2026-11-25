@@ -29,12 +29,6 @@ export async function promoteMain(api, { repository, sha, digest }) {
   ] });
   if (previous) {
     const last = await api('GET', `${root}/commits/${previous}`);
-    if (last.tree.sha === tree.sha) {
-      if ((await main()).object.sha !== sha || (await deployment()).object.sha !== previous) {
-        throw new Error('Deployment changed during comparison');
-      }
-      return previous;
-    }
     // A normal rollback commit is a durable hold. Resuming requires explicit
     // authorization of this exact image and source by a deployment writer.
     const subject = last.message?.split('\n', 1)[0] || '';
@@ -43,7 +37,13 @@ export async function promoteMain(api, { repository, sha, digest }) {
     if (!wasPromotion && !resume) {
       throw new Error('Manual deployment hold: approve the exact source SHA and digest before resuming');
     }
-    if (wasPromotion?.[1] === sha) throw new Error('Source already promoted with a different deployment tree');
+    if (wasPromotion?.[1] === sha) {
+      if (last.tree.sha !== tree.sha) throw new Error('Source already promoted with a different deployment tree');
+      if ((await main()).object.sha !== sha || (await deployment()).object.sha !== previous) {
+        throw new Error('Deployment changed during comparison');
+      }
+      return previous;
+    }
   }
   const next = await api('POST', `${root}/commits`, {
     message: `main 배포 ${sha}`, tree: tree.sha, parents: [previous || sha]

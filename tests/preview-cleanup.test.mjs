@@ -179,6 +179,17 @@ test('changed Git roots or a new closure epoch stop collection, including empty 
   }
 });
 
+test('an empty cleanup still checks the deployment refs and closure without reading rollback manifests', () => {
+  const f = fixture([version(1, tag(24))]);
+  let checked = 0;
+  assert.equal(cleanup(f.publisher, f.registry, 23, {
+    apply: true, log() {}, assertCurrent() { checked++; },
+    deploymentRoots() { throw Error('unexpected rollback lookup'); },
+  }), true);
+  assert.equal(checked, 1);
+  assert.deepEqual(f.removed, []);
+});
+
 test('the pinned main deployment and previous distinct digest are protected across consecutive equal values', () => {
   const prev = 'b'.repeat(40), oldest = 'c'.repeat(40);
   const repo = 'Team/Example';

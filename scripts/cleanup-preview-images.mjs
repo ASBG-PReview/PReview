@@ -1,7 +1,7 @@
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Publisher } from './preview-publish.mjs';
-import { readState, stateFiles } from './reconcile-preview-state.mjs';
+import { listCleanup, protectedStateDigests } from './reconcile-preview-state.mjs';
 
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const isSha = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);
@@ -87,14 +87,8 @@ function manifestOrder(registry, roots, candidates) {
   return { protectedDigests, deletions: childrenFirst.reverse() };
 }
 
-function activePRRoots(publisher, number) {
-  const files = stateFiles(publisher);
-  if (files.has(number)) throw new Error('Preview state still exists; retry after reconciliation');
-  return [...files].map(([pr, sha]) => readState(publisher, pr, sha).imageDigest);
-}
-
 export function cleanup(publisher, registry, number, {
-  apply = false, log = console.log, deploymentRoots = () => activePRRoots(publisher, number),
+  apply = false, log = console.log, deploymentRoots = () => protectedStateDigests(publisher, { retiringNumber: number }),
   assertCurrent = () => {}, expectedClose,
 } = {}) {
   if (!Number.isSafeInteger(number) || number < 1) throw new Error('Expected a positive PR number');
@@ -105,7 +99,7 @@ export function cleanup(publisher, registry, number, {
       Date.parse(pr.closed_at) === Date.parse(expectedClose));
   }
   if (!isClosed()) { log('PR closure no longer matches; no cleanup'); return false; }
-  const roots = new Set(deploymentRoots());
+  const roots = new Set();
   const versions = registry.versions();
   const expected = inventory(versions);
   const candidates = new Map();
@@ -114,6 +108,7 @@ export function cleanup(publisher, registry, number, {
     else roots.add(v.name);
   }
   if (!candidates.size) { assertCurrent(); log('No exclusive PR image versions'); return isClosed(); }
+  for (const digest of deploymentRoots()) roots.add(digest);
   const { protectedDigests, deletions } = manifestOrder(registry, roots, candidates);
   for (const digest of candidates.keys()) {
     if (protectedDigests.has(digest)) log('Retain referenced ' + digest);
@@ -189,18 +184,15 @@ async function run() {
       throw new Error('Deployment revision changed; retry cleanup');
     }
   }
-  const { protectedStateDigests, listCleanup } = await import('./reconcile-preview-state.mjs');
   const number = Number(pr);
-  const ticket = flag && listCleanup(publisher).find(item => item.prNumber === number &&
-    item.ticketSha === process.env.PREVIEW_CLEANUP_TICKET);
+  const ticket = flag && listCleanup(publisher, { number }).find(item => item.ticketSha === process.env.PREVIEW_CLEANUP_TICKET);
   if (flag && (!ticket || !Number.isFinite(Date.parse(ticket.closedAt)))) {
     throw new Error('No matching cleanup ticket outside the retention window');
   }
   const complete = cleanup(publisher, registry, number, { apply: Boolean(flag), assertCurrent,
     expectedClose: flag ? ticket.closedAt : undefined,
     deploymentRoots() {
-      const roots = [...activePRRoots(publisher, number), ...mainImageRoots(publisher, main, repository),
-        ...protectedStateDigests(publisher)];
+      const roots = [...mainImageRoots(publisher, main, repository), ...protectedStateDigests(publisher, { retiringNumber: number })];
       assertCurrent();
       return roots;
     },

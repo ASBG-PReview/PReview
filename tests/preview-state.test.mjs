@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { reconcile, reconcileWithRetry, listCleanup, acknowledge, protectedStateDigests, readState, stateFiles, slotLimit } from '../scripts/reconcile-preview-state.mjs';
-import { slotPath, projectionPath, ticketPath, cursorPath, StateStore, assertProjection, graceMs, legacyChart } from '../scripts/preview-state-store.mjs';
+import { slotPath, projectionPath, ticketPath, pendingPath, cursorPath, StateStore, assertProjection, graceMs, legacyChart } from '../scripts/preview-state-store.mjs';
 import { fixture, pull, state, legacy, ticket, now, chart, head, otherHead, digest, oldDigest } from './preview-state-fixture.mjs';
 import { approvedCharts, verifiedChart } from '../scripts/preview-chart-policy.mjs';
 const run = (f, options = {}) => reconcile(f, msg => f.diagnostics.push(msg), { now, chartRevision: chart, ...options });
@@ -142,7 +142,8 @@ test('closed state is removed atomically with ticket, then lowest-numbered waiti
   const f = fixture({ prs: [pull(17, { state: 'closed' }), pull(18), pull(19), pull(10)], slots: { 17: state(17), 18: state(18) } });
   f.afterWrite = msg => {
     if (msg.includes('프리뷰 종료')) {
-      assert.deepEqual(f.get(ticketPath(17)), ticket(17));
+      assert.deepEqual(f.get(ticketPath(17)), ticket(17, { retiredAt: null }));
+      assert.equal(f.get(pendingPath(17)), true);
       assert.equal(deployed(f, 17), undefined);
     }
   };
@@ -278,6 +279,16 @@ test('cost scales with actionable previews rather than the full open PR list', (
   assert.equal(f.writes.length, 0);
 });
 
+test('300 dormant cleanup tickets require no additional API calls during reconciliation', () => {
+  const tickets = Object.fromEntries(Array.from({ length: 300 }, (_, i) => [i + 1, ticket(i + 1)]));
+  const empty = fixture(), backlogged = fixture({ tickets });
+  assert.equal(run(empty), 0);
+  assert.equal(run(backlogged), 0);
+  assert.equal(backlogged.reads.length, empty.reads.length);
+  assert.deepEqual(backlogged.reads.filter(path => path.startsWith('/git/blobs/')), empty.reads.filter(path => path.startsWith('/git/blobs/')));
+  assert.equal(backlogged.writes.length, 0);
+});
+
 test('head change before write is skipped, and after write triggers another pass', () => {
   for (const timing of ['before', 'after']) {
     const f = fixture({ prs: [pull(17)] });
@@ -328,6 +339,25 @@ test('closure before activation is not backfilled unless explicitly requested', 
   assert.equal(f.get(ticketPath(17)).reason, 'closed');
 });
 
+for (const mutation of ['comment', 'reopen']) test('multi-page closure scan survives a concurrent ' + mutation, () => {
+  const iso = value => new Date(value).toISOString();
+  const prs = Array.from({ length: 101 }, (_, i) => {
+    const at = iso(now - (180 + i) * 1000);
+    return pull(i + 1, { state: 'closed', closed_at: at, updated_at: at });
+  });
+  const f = fixture({ prs, cursor: { through: iso(now - graceMs) } });
+  f.beforeRead = path => {
+    if (path.startsWith('/pulls?') && !path.includes('state=open') && path.endsWith('page=2')) {
+      if (mutation === 'comment') f.live.get(101).updated_at = iso(now);
+      else f.live.set(1, pull(1));
+    }
+  };
+  assert.equal(run(f), 0);
+  assert.deepEqual(f.get(ticketPath(101)).closedAt, prs.at(-1).closed_at);
+  assert.equal(f.get(cursorPath).through, prs[0].closed_at);
+  assert.equal(f.get(ticketPath(1))?.reason, mutation === 'comment' ? 'closed' : undefined);
+});
+
 test('all live states and tickets in grace protect images; stale acknowledgement cannot clear a new ticket', () => {
   const oldAt = '2000-01-01T00:00:00.000Z';
   const f = fixture({
@@ -342,6 +372,16 @@ test('all live states and tickets in grace protect images; stale acknowledgement
   acknowledge(f, 17, matches[0].ticketSha);
   acknowledge(f, 17, matches[0].ticketSha);
   assert.equal(f.get(ticketPath(17)), undefined);
+});
+
+test('applying one cleanup ticket reads only its blob and live PR', () => {
+  const old = '2000-01-01T00:00:00Z';
+  const prs = Array.from({ length: 60 }, (_, i) => pull(i + 1, { state: 'closed', closed_at: old }));
+  const tickets = Object.fromEntries(prs.map(p => [p.number, ticket(p.number, { closedAt: old, retiredAt: old, previous: null })]));
+  const f = fixture({ prs, tickets });
+  assert.deepEqual(listCleanup(f, { now, number: 51 }), [{ prNumber: 51, closedAt: old, ticketSha: f.fileSha(ticketPath(51)) }]);
+  assert.equal(f.reads.length, 3);
+  assert.deepEqual(listCleanup(f, { now, number: 61 }), []);
 });
 
 test('an old close starts a full grace period when the slot is finally removed', () => {
@@ -371,6 +411,31 @@ test('a reopen-close cycle invalidates the former GC ticket before reconciliatio
   assert.notEqual(f.fileSha(ticketPath(17)), pending.ticketSha);
   assert.equal(f.get(ticketPath(17)).previous, null);
   assert.throws(() => acknowledge(f, 17, pending.ticketSha), /replaced/);
+});
+
+test('the grace clock starts after Git confirms retirement, including recovery after a lost response', () => {
+  for (const interrupt of [false, true]) {
+    let clock = now;
+    const f = fixture({ prs: [pull(17, { state: 'closed' })], slots: { 17: state(17) } });
+    f.afterWrite = message => {
+      if (!message.includes('프리뷰 종료')) return;
+      clock += 10 * 60_000;
+      if (interrupt) throw Error('lost ref update response');
+    };
+    const options = { clock: () => clock };
+    if (interrupt) {
+      assert.throws(() => run(f, options), /lost ref update/);
+      clock += 2 * graceMs;
+      assert.deepEqual(listCleanup(f, { now: clock }), []);
+      assert.deepEqual(protectedStateDigests(f, { now: clock }), new Set([digest]));
+      assert.throws(() => acknowledge(f, 17, f.fileSha(ticketPath(17))), /no longer eligible/);
+    }
+    assert.equal(run(f, options), 0);
+    assert.equal(Date.parse(f.get(ticketPath(17)).retiredAt), clock);
+    assert.equal(f.get(pendingPath(17)), undefined);
+    assert.deepEqual(listCleanup(f, { now: clock + graceMs - 1 }), []);
+    assert.equal(listCleanup(f, { now: clock + graceMs }).length, 1);
+  }
 });
 
 test('unavailable registry preserves LKG and still retires confirmed closes', () => {
