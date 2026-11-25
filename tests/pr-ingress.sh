@@ -3,7 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh > "$tmp/controllers.yaml"
+EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh both > "$tmp/controllers.yaml"
 ruby -ryaml -e '
 main, prs, *extra = YAML.load_stream(File.read(ARGV.fetch(0)))
 raise "expected main and PR controllers" unless extra.empty? && main["kind"] == "Application" && prs["kind"] == "ApplicationSet"
@@ -13,6 +13,20 @@ raise "PR destination" unless prs.dig("spec","template","spec","destination") ==
 raise "unexpected main source" unless main.dig("spec","source","targetRevision") == "main-deploy"
 raise "incorrect deployment projection" unless prs.dig("spec","generators",0,"git","files").map { |f| f.fetch("path") } == ["deployments/pr-*/state.json"]
 ' "$tmp/controllers.yaml"
+EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh pr > "$tmp/pr.yaml"
+EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh > "$tmp/default.yaml"
+cmp "$tmp/pr.yaml" "$tmp/default.yaml"
+ruby -ryaml -e 'raise "expected one remote PR controller" unless YAML.load_stream(File.read(ARGV[0])).compact == [YAML.load_stream(File.read(ARGV[1])).compact.fetch(1)]' "$tmp/pr.yaml" "$tmp/controllers.yaml"
+env -u EKS_SERVER bash argocd/render-eks.sh both --in-cluster > "$tmp/local.yaml"
+ruby -ryaml -e 'main, set, *extra = YAML.load_stream(File.read(ARGV[0])).compact
+  target = {"server"=>"https://kubernetes.default.svc","namespace"=>"container-2"}
+  raise "incorrect in-cluster destination" unless extra.empty? && main.dig("spec","destination")==target && set.dig("spec","template","spec","destination")==target' "$tmp/local.yaml"
+for args in "typo" "both wrong" "pr --in-cluster" "both --in-cluster extra"; do
+  read -ra flags <<< "$args"
+  if EKS_SERVER=https://test.example.invalid bash argocd/render-eks.sh "${flags[@]}" > /dev/null 2>&1; then
+    echo "Unexpected renderer arguments accepted: $args" >&2; exit 1
+  fi
+done
 for invalid in https://kubernetes.default.svc https://KUBERNETES.DEFAULT.SVC.CLUSTER.LOCAL:443/ \
                http://test.example.invalid https://user@test.example.invalid; do
   if EKS_SERVER="$invalid" bash argocd/render-eks.sh > /dev/null 2>&1; then

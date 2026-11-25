@@ -170,13 +170,23 @@ export class StateStore {
   }
 }
 
-export function assertProjection(store) {
+export function assertProjection(store, allowed, now = Date.now()) {
   if (store.unknown.length) throw new Error('Unexpected watched paths: ' + store.unknown.join(', '));
+  function verifyPin(state, n) {
+    if (allowed && state && !allowed.includes(state.chartRevision)) {
+      throw new Error('Unapproved chartRevision for PR #' + n + ': ' + state.chartRevision);
+    }
+  }
   for (const n of new Set([...store.slots, ...store.projections])) {
     const source = checkedState(store.read(slotPath(n)), n);
     const deployment = checkedState(store.read(projectionPath(n)), n, true);
+    verifyPin(deployment, n);
     if (!isDeepStrictEqual(pinnedState(source), deployment)) {
       throw new Error('Projection does not match slot #' + n);
     }
+  }
+  for (const n of store.tickets) {
+    const ticket = checkedTicket(store.read(ticketPath(n)), n);
+    if (inGrace(ticket, now)) verifyPin(pinnedState(ticket.previous), n);
   }
 }

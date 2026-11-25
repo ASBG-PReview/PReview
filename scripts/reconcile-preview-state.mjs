@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 import { Publisher, currentPR } from './preview-publish.mjs';
+import { approvedCharts, verifiedChart } from './preview-chart-policy.mjs';
 import {
   InvalidState, StateStore, inventory, pinnedState, inGrace, checkedState, checkedTicket,
   slotPath, projectionPath, ticketPath, cursorPath, isSha, isDigest, isTimestamp, readBlob, assertProjection
@@ -152,6 +153,12 @@ export function reconcile(publisher, log = console.log, options = {}) {
   if (options.closedPr) discovered.add(options.closedPr);
   const covered = new Set();
   let failures = 0;
+  let allowed;
+  if (options.chartConfig !== undefined) {
+    try { allowed = approvedCharts(options.chartConfig); }
+    catch (error) { allowed = []; failures++; log('Chart approval is invalid: ' + error.message); }
+  }
+  const canRestore = state => !state?.chartRevision || !allowed || allowed.includes(state.chartRevision);
   function problem(n, message) { failures++; log(`PR #${n}: ${message}`); }
   function refresh(n) {
     try { return livePR(publisher, n); }
@@ -235,7 +242,8 @@ export function reconcile(publisher, log = console.log, options = {}) {
         const after = refresh(n);
         if (!after) occupied.add(n);
         else if (after.state === 'open' && targetsMain(after, repo)) {
-          restore(previous);
+          if (canRestore(previous)) restore(previous);
+          else problem(n, 'previous chart is no longer approved; keeping the recovery ticket');
           occupied.add(n);
           log('Restored reopened PR #' + n);
         }
@@ -243,7 +251,7 @@ export function reconcile(publisher, log = console.log, options = {}) {
       continue;
     }
     covered.add(n);
-    if (hasSlot && previous?.chartRevision) {
+    if (hasSlot && previous?.chartRevision && canRestore(previous)) {
       // The independent projection is authoritative when a single copy is
       // damaged. Also bootstrap a projection for a trusted v1 file.
       if (malformed || !isDeepStrictEqual(actual[slotPath(n)], previous) || !isDeepStrictEqual(actual[projectionPath(n)], previous)) {
@@ -259,7 +267,7 @@ export function reconcile(publisher, log = console.log, options = {}) {
       continue;
     }
     if (!hasSlot && ticket?.previous && inGrace(ticket, now)) {
-      if (ticket.reason === 'closed') {
+      if (ticket.reason === 'closed' && canRestore(ticket.previous)) {
         const confirm = refresh(n);
         if (!confirm || confirm.state !== 'open' || !targetsMain(confirm, repo)) continue;
         restore(ticket.previous);
@@ -276,7 +284,7 @@ export function reconcile(publisher, log = console.log, options = {}) {
     catch (error) { problem(n, 'waiting for verified image: ' + error.message); continue; }
     const digest = typeof image === 'string' && image.split('@')[1];
     if (!isDigest(digest) || image !== verifiedImage(repo, digest)) { problem(n, 'unexpected verified image'); continue; }
-    const sameImage = previous?.chartRevision && previous.commitSha === pr.head.sha && previous.imageDigest === digest;
+    const sameImage = previous?.chartRevision && canRestore(previous) && previous.commitSha === pr.head.sha && previous.imageDigest === digest;
     if (!sameImage) {
       // A signed legacy receipt can predate the build's prefixed-route smoke
       // test. Require the PR recipe and workflow to match the trusted checkout
@@ -287,8 +295,10 @@ export function reconcile(publisher, log = console.log, options = {}) {
         problem(n, 'waiting for a compatible chart and image: ' + error.message);
         continue;
       }
-      if (!chart) chart = publisher.command('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-      if (!isSha(chart)) throw new Error('Invalid trusted chart revision');
+      try {
+        if (!chart) chart = verifiedChart(publisher, (allowed || approvedCharts())[0]);
+        if (!isSha(chart) || (allowed && !allowed.includes(chart))) throw new Error('Invalid or unapproved chart revision');
+      } catch (error) { problem(n, 'chart promotion pending: ' + error.message); continue; }
     }
     const confirm = refresh(n);
     if (!confirm || !eligible(confirm, repo) || confirm.head.sha !== pr.head.sha) continue;
@@ -337,9 +347,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1]
   const [repository, mode, arg, sha, ...extra] = process.argv.slice(2);
   const publisher = new StatePublisher(repository);
   if (mode === '--list-cleanup' && !arg) console.log(JSON.stringify(listCleanup(publisher)));
-  else if (mode === '--check-projection' && !arg) assertProjection(new StateStore(publisher));
+  else if (mode === '--check-projection' && !arg) assertProjection(new StateStore(publisher), approvedCharts(process.env.PREVIEW_CHART_REVISIONS));
   else if (mode === '--ack-cleanup' && !extra.length) acknowledge(publisher, Number(arg), sha);
   else if ((!mode || (mode === '--closed-pr' && /^[1-9]\d*$/.test(arg) && validNumber(Number(arg)))) && !sha) {
-    if (await reconcileWithRetry(publisher, { closedPr: arg && Number(arg), maxSlots: process.env.PREVIEW_MAX_SLOTS, registryUnavailable: process.env.PREVIEW_REGISTRY_UNAVAILABLE === '1' })) process.exitCode = 1;
+    if (await reconcileWithRetry(publisher, { closedPr: arg && Number(arg), maxSlots: process.env.PREVIEW_MAX_SLOTS,
+      chartConfig: process.env.PREVIEW_CHART_REVISIONS ?? '', registryUnavailable: process.env.PREVIEW_REGISTRY_UNAVAILABLE === '1' })) process.exitCode = 1;
   } else throw new Error('Usage: OWNER/REPO [--closed-pr N | --list-cleanup | --ack-cleanup N TICKET_SHA | --check-projection]');
 }

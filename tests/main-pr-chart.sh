@@ -55,4 +55,29 @@ helm template preview-local charts/preview-api -f charts/preview-api/values-loca
 if helm template preview-pr-17 charts/preview-api --set-string preview.prNumber=main --set-string "preview.commitSha=$sha" --set-string "image.digest=$digest" >/dev/null 2>&1; then
  echo 'PR validation weakened' >&2; exit 1
 fi
-echo 'Main and PR shared ALB checks passed'
+# Exercise the actual README example with a verified image fixture and no Kubernetes context.
+HEAD_SHA="$sha" IMAGE_DIGEST="$digest" ruby -rshellwords -ryaml -ropen3 -e '
+  example = File.read("README.md")[/^```sh\n(PR_NUMBER=\d+\nhelm template .*?)\n```/m, 1] or abort "missing manual EKS example"
+  assignment, command = example.split("\n", 2)
+  pr = assignment.delete_prefix("PR_NUMBER=")
+  vars = {"PR_NUMBER"=>pr, "HEAD_SHA"=>ENV.fetch("HEAD_SHA"), "IMAGE_DIGEST"=>ENV.fetch("IMAGE_DIGEST")}
+  args = Shellwords.split(command.gsub(/\\\n/, " ")).map { |a| a.gsub(/\$(\w+)/) { vars.fetch($1) } }
+  abort "expected helm template" unless args.take(2) == ["helm", "template"]
+  abort "wrong namespace" unless args.each_cons(2).include?(["--namespace", "container-2"])
+  text, err, status = Open3.capture3(*args)
+  abort err unless status.success?
+  objects = YAML.load_stream(text).compact
+  d,s,i = %w[Deployment Service Ingress].map { |kind| objects.find { |obj| obj["kind"] == kind } || abort("missing #{kind}") }
+  pod = d.dig("spec","template")
+  c = pod.dig("spec","containers",0)
+  path = "/container-2/pr-#{pr}"
+  env = c.fetch("env").to_h { |e| [e["name"], e["value"]] }
+  abort "README image or identity" unless c.fetch("image").end_with?("@"+vars.fetch("IMAGE_DIGEST")) &&
+    env.values_at("PR_NUMBER","COMMIT_SHA","BASE_PATH","SERVER_SERVLET_CONTEXT_PATH") == [pr,vars.fetch("HEAD_SHA"),path,path]
+  abort "README routing" unless i.dig("spec","rules",0,"http","paths",0,"path") == path &&
+    i.dig("spec","rules",0,"http","paths",0,"backend","service","name") == s.dig("metadata","name") &&
+    i.dig("metadata","annotations","alb.ingress.kubernetes.io/healthcheck-path") == path + "/health" &&
+    s.dig("spec","selector").all? { |k,v| pod.dig("metadata","labels",k) == v }
+  abort "README probes" unless %w[startupProbe readinessProbe livenessProbe].all? { |k| c.dig(k,"httpGet","path") == path + "/health" }
+'
+echo 'Main, PR and README shared ALB checks passed'

@@ -22,7 +22,7 @@ spec:
       project: default
       source:
         repoURL: https://github.com/ASBG-PReview/PReview.git
-        targetRevision: '{{ if not (regexMatch "^[0-9a-f]{40}$" .chartRevision) }}{{ fail "invalid chartRevision" }}{{ end }}{{ .chartRevision }}'
+        targetRevision: '{{ if not (has .chartRevision (list "55d093d0e6cd705e216de4efd2b4a216e7330644")) }}{{ fail "unapproved chartRevision" }}{{ end }}{{ .chartRevision }}'
         path: charts/preview-api
         helm:
           releaseName: 'preview-pr-{{ .prNumber }}'

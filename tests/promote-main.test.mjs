@@ -145,7 +145,9 @@ test('a stale build, including one superseded while preparing a commit, cannot a
 test('reports changes immediately after an accepted ref movement', async () => {
   const f = fixture();
   f.hook.afterWrite = () => f.moveMain(older);
-  await assert.rejects(promoteMain(f.api, identity), /advanced after the ref write/);
+  await assert.rejects(promoteMain(f.api, identity), error =>
+    error.message.includes('advanced after the ref write') && error.message.includes('source=' + sha) &&
+    error.message.includes('main=' + older) && error.message.includes('main-deploy='));
   assert.equal(f.writes().length, 1);
 });
 

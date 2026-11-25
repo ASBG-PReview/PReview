@@ -73,7 +73,7 @@ make clean
 
 `make deploy`는 로컬 Docker 이미지 ID에서 `local-<64자리>` 태그를 만들고 선택한 프로필에 이미지를 로드합니다. 같은 `IMAGE_TAG`로 다시 빌드해도 내용이 달라지면 Pod 이미지가 바뀝니다. `make load`로 이미지 로드만 실행할 수도 있습니다. 배포는 `preview-local` 네임스페이스와 로컬 `quota.yaml`을 준비한 뒤 rollout 완료를 기다립니다. `make test`는 현재 Docker 이미지와 Deployment의 이미지가 일치하는지 확인하고 임시 포트 포워딩(기본 18080)으로 상태·환경·버전을 검증합니다. 배포와 테스트에는 동일한 식별자를 전달합니다(`make deploy PR_NUMBER=12 COMMIT_SHA=abc123`, `make test PR_NUMBER=12 COMMIT_SHA=abc123`). `make clean`은 해당 Helm 릴리스를 삭제합니다. 로컬 Ingress에는 minikube의 nginx ingress 애드온이 필요합니다.
 
-아래 명령은 수동 EKS 배포에 사용할 PR 매니페스트를 렌더링합니다. Argo CD가 이미 관리하는 릴리스는 같은 상태 파일을 통해 갱신합니다. 검증한 PR 번호·전체 head SHA·이미지 digest와 그 상태에 기록된 `chartRevision`의 차트를 함께 사용합니다.
+아래 명령은 수동 EKS 배포에 사용할 PR 매니페스트를 렌더링합니다. Argo CD가 이미 관리하는 릴리스는 상태 파일로 갱신합니다. 해당 PR의 배포 입력에서 전체 head SHA와 이미지 digest를 읽어 `HEAD_SHA`와 `IMAGE_DIGEST`에 지정하고, 기록된 `chartRevision`을 체크아웃한 깨끗한 작업 트리에서 실행합니다. CI도 이 예제의 실제 인수로 렌더링해 Ingress부터 Service, Pod와 세 probe까지 같은 경로를 쓰는지 검사합니다.
 
 ```sh
 PR_NUMBER=12

@@ -8,7 +8,16 @@ require "yaml"
 Dir.mktmpdir("preview-appset") do |chart|
   File.write("#{chart}/Chart.yaml", "apiVersion: v2\nname: fixture\nversion: 0.1.0\n")
   Dir.mkdir("#{chart}/templates")
-  app = YAML.load_file("argocd/applicationset.yaml").fetch("spec").fetch("template")
+  revision = "c" * 40
+  prior = "d" * 40
+  baseline = "55d093d0e6cd705e216de4efd2b4a216e7330644"
+  manifest, err, status = Open3.capture3({"PREVIEW_CHART_REVISIONS" => "#{revision},#{prior}", "EKS_SERVER" => nil},
+    "bash", "argocd/render-eks.sh", "pr", "--in-cluster")
+  raise err unless status.success?
+  app = YAML.safe_load(manifest).fetch("spec").fetch("template")
+  raw = YAML.load_file("argocd/applicationset.yaml").dig("spec","template","spec","source","targetRevision")
+  default, err, status = Open3.capture3({"PREVIEW_CHART_REVISIONS"=>nil}, "node", "scripts/preview-chart-policy.mjs")
+  raise "bootstrap chart policy differs from the renderer" unless status.success? && raw == default.chomp
   app.merge!("apiVersion" => "argoproj.io/v1alpha1", "kind" => "Application")
   expressions = {}
   template = JSON.generate(app).gsub(/"(?:[^"\\]|\\.)*"/) do |quoted|
@@ -21,7 +30,6 @@ Dir.mktmpdir("preview-appset") do |chart|
   File.write("#{chart}/templates/application.yaml", template)
   sha = "a" * 40
   digest = "sha256:" + "b" * 64
-  revision = "c" * 40
   state = {"path" => {"basename" => "pr-17"}, "prNumber" => "17",
            "commitSha" => sha, "imageDigest" => digest, "chartRevision" => revision}
   render = lambda do |record|
@@ -51,7 +59,12 @@ Dir.mktmpdir("preview-appset") do |chart|
   raise "wrong image" unless container.fetch("image") == "ghcr.io/asbg-preview/preview@#{digest}"
   raise "wrong identity" unless env["COMMIT_SHA"] == sha && env["PR_NUMBER"] == "17"
   raise "wrong readiness" unless container.dig("readinessProbe", "httpGet", "path") == "/container-2/pr-17/health"
+  [prior, baseline].each do |pin|
+    text, err, status = render.call(state.merge("chartRevision"=>pin))
+    raise "retained chart rejected: #{err}" unless status.success? && YAML.load_stream(text).compact.fetch(0).dig("spec","source","targetRevision") == pin
+  end
   [state.reject { |k| k == "chartRevision" }, state.merge("chartRevision" => "main"),
+   state.merge("chartRevision" => "e" * 40), state.merge("chartRevision" => [revision]),
    state.merge("path" => {"basename" => "pr-017"}), state.merge("imageDigest" => [digest])].each do |bad|
     raise "invalid projection was accepted" if render.call(bad).last.success?
   end

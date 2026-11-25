@@ -3,8 +3,71 @@ import assert from 'node:assert/strict';
 import { reconcile, reconcileWithRetry, listCleanup, acknowledge, protectedStateDigests, readState, stateFiles, slotLimit } from '../scripts/reconcile-preview-state.mjs';
 import { slotPath, projectionPath, ticketPath, cursorPath, StateStore, assertProjection, graceMs, legacyChart } from '../scripts/preview-state-store.mjs';
 import { fixture, pull, state, legacy, ticket, now, chart, head, otherHead, digest, oldDigest } from './preview-state-fixture.mjs';
+import { approvedCharts, verifiedChart } from '../scripts/preview-chart-policy.mjs';
 const run = (f, options = {}) => reconcile(f, msg => f.diagnostics.push(msg), { now, chartRevision: chart, ...options });
 const deployed = (f, n) => { assert.deepEqual(f.get(slotPath(n)), f.get(projectionPath(n))); return f.get(projectionPath(n)); };
+
+test('chart approval is ordered and accepts only full SHAs, including the verified legacy baseline', () => {
+  assert.deepEqual(approvedCharts(), [legacyChart]);
+  assert.deepEqual(approvedCharts(chart + ', ' + head + ',' + chart), [chart, head, legacyChart]);
+  for (const bad of ['main', chart + ',', '  ', 'a'.repeat(39), [chart]]) assert.throws(() => approvedCharts(bad));
+});
+
+test('new pins require both a trusted ancestor and the chart tree that was tested', () => {
+  const f = fixture({ prs: [pull(17), pull(18, { state: 'closed' })], slots: { 18: state(18) } });
+  const calls = [];
+  let ancestor = false, equal = false;
+  f.command = (tool, args) => {
+    assert.equal(tool, 'git');
+    calls.push(args);
+    if (args[0] === 'merge-base') {
+      assert.deepEqual(args, ['merge-base', '--is-ancestor', chart, 'HEAD']);
+      if (!ancestor) throw new Error('not a trusted ancestor');
+      return '';
+    }
+    assert.equal(args[0], 'rev-parse');
+    if (args[1] === chart + ':charts/preview-api') return head;
+    assert.equal(args[1], 'HEAD:charts/preview-api');
+    return equal ? head : otherHead;
+  };
+  const options = { chartConfig: chart, chartRevision: undefined };
+  assert.ok(run(f, options) > 0);
+  assert.equal(deployed(f, 17), undefined);
+  assert.equal(deployed(f, 18), undefined);
+  ancestor = true;
+  assert.throws(() => verifiedChart(f, chart), /differs/);
+  assert.ok(run(f, options) > 0);
+  equal = true;
+  assert.equal(run(f, options), 0);
+  assert.equal(deployed(f, 17).chartRevision, chart);
+  assert.ok(calls.length);
+});
+
+test('check-projection considers active records and the previous chart of an unexpired recovery ticket', () => {
+  const f = fixture({ slots: { 17: state(17) }, tickets: { 18: ticket(18, { previous: state(18, { chartRevision: otherHead }) }) } });
+  const store = new StateStore(f);
+  assert.throws(() => assertProjection(store, [otherHead], now), /PR #17/);
+  assert.throws(() => assertProjection(store, [chart], now), /PR #18/);
+  assert.doesNotThrow(() => assertProjection(store, [chart, otherHead], now));
+  assert.doesNotThrow(() => assertProjection(store, [chart], now + graceMs));
+  const unpinned = fixture({ tickets: { 18: ticket(18, { previous: legacy(18) }) } });
+  assert.throws(() => assertProjection(new StateStore(unpinned), [chart], now), /PR #18/);
+});
+
+test('reopening cannot republish a ticket whose pinned chart was revoked', () => {
+  const f = fixture({ prs: [pull(17, { labels: [] })], tickets: { 17: ticket(17, { previous: state(17, { chartRevision: otherHead }) }) } });
+  run(f, { chartConfig: chart });
+  assert.equal(deployed(f, 17), undefined);
+  assert.ok(f.get(ticketPath(17)));
+});
+
+test('invalid chart configuration defers new pins but still retires an independent closed slot', () => {
+  const f = fixture({ prs: [pull(17), pull(18, { state: 'closed' })], slots: { 18: state(18) } });
+  assert.ok(run(f, { chartConfig: 'invalid', chartRevision: undefined }) > 0);
+  assert.equal(deployed(f, 17), undefined);
+  assert.equal(deployed(f, 18), undefined);
+  assert.ok(f.get(ticketPath(18)));
+});
 const sequence = (f, fn) => {
   const counts = new Map();
   f.beforeRead = path => {

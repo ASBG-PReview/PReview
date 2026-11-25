@@ -52,8 +52,10 @@ export async function promoteMain(api, { repository, sha, digest }) {
   // No force: concurrent state updates must fail rather than overwrite another deployment.
   if (previous) await api('PATCH', `${root}/refs/heads/main-deploy`, { sha: next.sha, force: false });
   else await api('POST', `${root}/refs`, { ref: 'refs/heads/main-deploy', sha: next.sha });
-  if ((await main()).object.sha !== sha || (await deployment()).object.sha !== next.sha) {
-    throw new Error('Main or deployment advanced after the ref write; inspect the newer deployment');
+  const observedMain = (await main()).object.sha;
+  const observedDeployment = (await deployment()).object.sha;
+  if (observedMain !== sha || observedDeployment !== next.sha) {
+    throw new Error(`Main or deployment advanced after the ref write: published source=${sha}, deployment=${next.sha}; observed main=${observedMain}, main-deploy=${observedDeployment}`);
   }
   return next.sha;
 }
@@ -73,6 +75,6 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   } else {
     if (process.argv.length !== 2 || !process.env.PREVIEW_STATE_TOKEN || !process.env.GH_TOKEN) throw new Error('Missing promotion credentials or invalid arguments');
     const deployment = await promoteMain(github, identity);
-    console.log('Verified main deployment ' + deployment);
+    console.log(`Verified main deployment: source=${identity.sha} digest=${identity.digest} main-deploy=${deployment}`);
   }
 }
