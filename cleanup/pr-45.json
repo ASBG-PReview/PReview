@@ -1,0 +1,12 @@
+{
+  "prNumber": "45",
+  "reason": "closed",
+  "closedAt": "2026-11-25T15:46:44Z",
+  "retiredAt": null,
+  "previous": {
+    "prNumber": "45",
+    "commitSha": "769966c4b21ea49d7c8d6fe5b095b581052985d6",
+    "imageDigest": "sha256:b361edb7b6fe8af46df2d4a6c40c92b07d4349f5fb515ac165817d8797d91747",
+    "chartRevision": "0e7ffb0488cd93e6e92aae50bb9db4b564e4feae"
+  }
+}
