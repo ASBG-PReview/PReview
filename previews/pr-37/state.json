@@ -1,5 +1,6 @@
 {
   "prNumber": "37",
   "commitSha": "abeb8733eba28bd12a5ed22869e5e86bf60725c6",
-  "imageDigest": "sha256:1acfe96eea05cb90ca79861be5d104c188aa3544f4b989308577350f732c888d"
+  "imageDigest": "sha256:1acfe96eea05cb90ca79861be5d104c188aa3544f4b989308577350f732c888d",
+  "chartRevision": "55d093d0e6cd705e216de4efd2b4a216e7330644"
 }
