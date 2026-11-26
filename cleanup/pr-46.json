@@ -2,7 +2,7 @@
   "prNumber": "46",
   "reason": "closed",
   "closedAt": "2026-11-26T07:25:20Z",
-  "retiredAt": null,
+  "retiredAt": "2026-11-26T07:25:49.749Z",
   "previous": {
     "prNumber": "46",
     "commitSha": "904bbade724b359d8ce98bdf36db2aa97c75939e",
