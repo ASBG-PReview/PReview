@@ -48,7 +48,8 @@ test('image tag includes repository, PR number and complete head SHA', () => {
 for (const [field, value] of [
   ['conclusion', 'failure'], ['event', 'push'], ['path', '.github/workflows/lookalike.yml'],
   ['head_repository', { id: 99 }], ['head_repository', null], ['head_sha', 'x'.repeat(40)],
-  ['head_sha', 'd'.repeat(40)], ['actor', { login: 'dependabot[bot]' }], ['pull_requests', []],
+  ['head_sha', 'd'.repeat(40)], ['actor', { login: 'dependabot[bot]' }], ['actor', null],
+  ['pull_requests', []], ['pull_requests', null], ['pull_requests', [null]],
 ]) {
   test('refuse unrelated run: ' + field + ' ' + JSON.stringify(value), () => {
     const payload = event();
@@ -112,7 +113,8 @@ for (const trusted of [false, true]) {
 for (const [condition, change] of [
   ['closed', { state: 'closed' }], ['new SHA', { head: { sha: 'd'.repeat(40), repo: { id: 4 } } }],
   ['fork', { head: { sha, repo: { id: 99 } } }], ['bot', { user: { login: 'dependabot[bot]' } }],
-  ['other base', { base: { ref: 'other', repo: { id: 4 } } }],
+  ['other base', { base: { ref: 'other', repo: { id: 4 } } }], ['deleted author', { user: null }],
+  ['deleted head', { head: null }], ['deleted base', { base: null }],
 ]) {
   test('delayed run refuses ' + condition, () => {
     assert.equal(currentPR({ ...livePR(), ...change }, candidateFor(event()), repo), false);

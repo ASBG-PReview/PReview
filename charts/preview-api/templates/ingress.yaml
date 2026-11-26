@@ -22,7 +22,7 @@ spec:
             pathType: {{ .Values.ingress.pathType }}
             backend:
               service:
-                name: {{ include "preview-api.fullname" . }}
+                name: {{ include "preview-api.serviceName" . }}
                 port:
                   number: {{ .Values.service.port }}
 {{- end }}
@@ -58,7 +58,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "preview-api.fullname" . }}
+                name: {{ include "preview-api.serviceName" . }}
                 port:
                   number: {{ .Values.service.port }}
 {{- end }}

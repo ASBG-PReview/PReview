@@ -14,24 +14,26 @@ const bot = 'dependabot[bot]';
 const fullSha = /^[0-9a-f]{40}$/;
 const digestPattern = /^sha256:[0-9a-f]{64}$/;
 const positiveId = n => Number.isSafeInteger(n) && n > 0;
+const eligibleActor = actor => typeof actor?.login === 'string' && actor.login.length > 0 && actor.login !== bot;
 const statusContext = n => 'preview/ready/pr-' + n;
 const imageName = repo => 'ghcr.io/' + repo.full_name.toLowerCase();
 const imageTag = (repo, pr) => imageName(repo) + ':pr-' + pr.number + '-' + pr.head.sha;
 
 export function candidateFor({ repository, workflow_run: run }) {
-  if (run.event !== 'pull_request' || run.conclusion !== 'success' || run.path !== buildPath ||
-      run.head_repository?.id !== repository.id || run.actor.login === bot || run.pull_requests.length !== 1) return null;
+  if (run?.event !== 'pull_request' || run.conclusion !== 'success' || run.path !== buildPath ||
+      !positiveId(repository?.id) || run.head_repository?.id !== repository.id || !eligibleActor(run.actor) ||
+      !Array.isArray(run.pull_requests) || run.pull_requests.length !== 1) return null;
   const [pr] = run.pull_requests;
-  if (!positiveId(pr.number) || !fullSha.test(run.head_sha) || pr.head.sha !== run.head_sha ||
-      pr.head.repo?.id !== repository.id || pr.base.repo?.id !== repository.id ||
+  if (!positiveId(pr?.number) || !fullSha.test(run.head_sha) || pr.head?.sha !== run.head_sha ||
+      pr.head.repo?.id !== repository.id || pr.base?.repo?.id !== repository.id ||
       pr.base.ref !== repository.default_branch || !fullSha.test(pr.base.sha)) return null;
   return pr;
 }
 
 export function currentPR(live, pr, repo) {
-  return live.state === 'open' && live.number === pr.number && live.user.login !== bot &&
-    live.head.sha === pr.head.sha && live.head.repo?.id === repo.id &&
-    live.base.repo?.id === repo.id && live.base.ref === repo.default_branch;
+  return live?.state === 'open' && live.number === pr.number && eligibleActor(live.user) &&
+    typeof pr.head?.sha === 'string' && live.head?.sha === pr.head.sha && live.head.repo?.id === repo.id &&
+    live.base?.repo?.id === repo.id && live.base.ref === repo.default_branch;
 }
 
 export function receipt(repo, pr, digest, runId, attempt) {

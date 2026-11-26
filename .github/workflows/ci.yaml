@@ -2,17 +2,27 @@ name: CI
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_current_main:
+        description: Rebuild, verify and publish the current main after an interrupted release
+        type: boolean
+        default: false
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Titles/body edits and manual checks must not evict required PR checks or a releasing main push.
+  group: ci-${{ github.event_name }}-${{ (github.event_name == 'workflow_dispatch' || (github.event.action == 'edited' && !github.event.changes.base)) && format('run-{0}', github.run_id) || github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 jobs:
   tests:
+    if: github.event.action != 'edited' || github.event.changes.base != null
     name: Preview publication policy
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -21,6 +31,11 @@ jobs:
         with:
           persist-credentials: false
       - run: node --test tests/*.test.mjs
+      - name: Test the local API caller
+        run: python3 -m unittest discover -s tools/api-caller -p 'test_*.py'
+      - name: Require main for release recovery
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_current_main
+        run: test "$GITHUB_REF" = refs/heads/main
       - name: Verify PR chart inputs and rendered Pod
         run: bash tests/preview-chart.sh
       - name: Verify main and PR shared ALB configuration
@@ -30,6 +45,9 @@ jobs:
       - name: Verify shared EKS Ingress routes
         run: bash tests/pr-ingress.sh
   docker:
+    if: github.event.action != 'edited' || github.event.changes.base != null
+    outputs:
+      artifact: ${{ steps.archive.outputs.artifact-id }}
     name: Spring image and registry test
     runs-on: ubuntu-24.04
     timeout-minutes: 25
@@ -37,26 +55,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Build and wait for the Spring service using Compose
+      - name: Check the Compose image at the root and the main EKS path
         env:
           PR_NUMBER: ${{ github.event.pull_request.number || 'main' }}
           COMMIT_SHA: ${{ github.sha }}
           NAMESPACE: ci-smoke
         run: |
-          docker compose up --build --wait --wait-timeout 100 --detach
-          base=http://127.0.0.1:8080
-          health=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/health.json" -w '%{http_code}' "$base/health")
-          test "$health" = 200
-          jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
-          status=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/env.json" -w '%{http_code}' "$base/environment")
-          test "$status" = 200
-          jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
-            .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/env.json"
           expected_version=$(cat preview-api/src/main/version.txt)
           test -n "$expected_version"
-          curl -fsS --max-time 5 -o "$RUNNER_TEMP/version.json" "$base/version"
-          jq -es --arg expected "$expected_version" \
-            'length == 1 and .[0].version == $expected' "$RUNNER_TEMP/version.json"
+          docker compose build
+          for prefix in '' '/container-2/main'; do
+            BASE_PATH="$prefix" docker compose up --no-build --wait --wait-timeout 100 --detach
+            base="http://127.0.0.1:8080$prefix"
+            health=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/health.json" -w '%{http_code}' "$base/health")
+            test "$health" = 200
+            jq -es 'length == 1 and .[0].status == "ok"' "$RUNNER_TEMP/health.json"
+            status=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/env.json" -w '%{http_code}' "$base/environment")
+            test "$status" = 200
+            jq -es 'length == 1 and (.[0] | .prNumber == env.PR_NUMBER and
+              .commitSha == env.COMMIT_SHA and .namespace == env.NAMESPACE)' "$RUNNER_TEMP/env.json"
+            version=$(curl -fsS --max-time 5 -o "$RUNNER_TEMP/version.json" -w '%{http_code}' "$base/version")
+            test "$version" = 200
+            jq -es --arg expected "$expected_version" \
+              'length == 1 and .[0].version == $expected' "$RUNNER_TEMP/version.json"
+          done
           container=$(docker compose ps -q preview-api)
           test "$(docker inspect -f '{{.State.Health.Status}}' "$container")" = healthy
           test "$(docker exec "$container" id -u)" -gt 0
@@ -95,65 +117,98 @@ jobs:
           docker compose down
           docker rm -f preview-registry || true
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        id: archive
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish_current_main)
         with:
-          name: preview-image
+          name: preview-image-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/preview-image.tar
           retention-days: 1
           compression-level: 0
           if-no-files-found: error
   required:
-    name: CI required
-    if: always()
+    name: ${{ github.event_name == 'workflow_dispatch' && 'Manual CI' || github.event.action == 'edited' && !github.event.changes.base && 'Metadata edit' || 'CI required' }}
+    if: always() && (github.event.action != 'edited' || github.event.changes.base != null)
     needs: [tests, docker]
     runs-on: ubuntu-24.04
     timeout-minutes: 2
     steps:
       - name: Require every check to pass
         env:
-          RESULTS: ${{ toJSON(needs) }}
+          POLICY_RESULT: ${{ needs.tests.result }}
+          IMAGE_RESULT: ${{ needs.docker.result }}
         run: |
-          jq -e 'all(.[]; .result == "success")' <<< "$RESULTS"
+          [[ "$POLICY_RESULT" == success && "$IMAGE_RESULT" == success ]]
   publish:
     name: Publish main image
     concurrency:
       group: preview-ghcr-writer
       queue: max
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    needs: required
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || inputs.publish_current_main)
+    needs: [required, docker]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: preview-publish
     permissions:
-      contents: write
+      actions: read
+      contents: read
       packages: write
+      attestations: write
+      id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - name: Require protected deployment writes before release
+        id: writer
+        uses: ./.github/actions/deployment-writer
+        with:
+          approved-rulesets: ${{ vars.PREVIEW_APPROVED_RULESETS }}
+          app-id: ${{ vars.PREVIEW_WRITER_APP_ID }}
+          private-key: ${{ secrets.PREVIEW_WRITER_PRIVATE_KEY }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: preview-image
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          artifact-ids: ${{ needs.docker.outputs.artifact || '0' }}
           path: ${{ runner.temp }}/preview-artifact
-      - name: Publish the tested image
+      - name: Prepare the tested image
+        id: prepare
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_USER: ${{ github.actor }}
           REPOSITORY: ${{ github.repository }}
           SHA: ${{ github.sha }}
         run: |
-          IMAGE="ghcr.io/${REPOSITORY,,}:sha-$SHA"
-          docker load -i "$RUNNER_TEMP/preview-artifact/preview-image.tar"
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$GH_USER" --password-stdin
-          docker tag preview-ci:build "$IMAGE"
-          docker push "$IMAGE"
-          # Inspect the immutable registry digest and confirm the published platform.
-          digest=$(docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}')
-          digest=${digest##*@}
-          docker pull "${IMAGE%:*}@$digest"
-          test "$(docker image inspect "${IMAGE%:*}@$digest" --format '{{.Os}}/{{.Architecture}}')" = linux/amd64
-          IMAGE_DIGEST="$digest" node scripts/promote-main.mjs
-          echo "Published: $IMAGE" >> "$GITHUB_STEP_SUMMARY"
-      - name: Clear registry credentials
-        if: always()
-        run: docker logout ghcr.io
+          directory="$RUNNER_TEMP/main-canonical"
+          archive="docker-archive:$RUNNER_TEMP/preview-artifact/preview-image.tar"
+          digest=$(bash scripts/publish_preview_image.sh prepare "$archive" "$directory")
+          IMAGE_DIGEST="$digest" node scripts/promote-main.mjs intent > "$RUNNER_TEMP/main-image-intent.json"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Authorize this tested main image before any package write
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/main-image-intent.json
+      - name: Publish or recover the authorized main digest
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          CANDIDATE: ${{ steps.prepare.outputs.digest }}
+        run: |
+          test "$(gh api "repos/$REPOSITORY/git/ref/heads/main" --jq '.object.sha')" = "$SHA"
+          export REGISTRY_AUTH_FILE="$RUNNER_TEMP/main-registry-auth.json"
+          trap 'rm -f "$REGISTRY_AUTH_FILE"' EXIT
+          printf '%s' "$GH_TOKEN" | skopeo login --authfile "$REGISTRY_AUTH_FILE" --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          image="ghcr.io/${REPOSITORY,,}:sha-$SHA"
+          digest=$(bash scripts/publish_preview_image.sh publish-main "$RUNNER_TEMP/main-canonical" "$image" "$CANDIDATE")
+          skopeo inspect --config "docker://${image%:*}@$digest" |
+            jq -es 'length == 1 and (.[0] | .os == "linux" and .architecture == "amd64")'
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          printf 'Verified main image `%s@%s`\n' "${image%:*}" "$digest" >> "$GITHUB_STEP_SUMMARY"
+      - name: Promote the verified main image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_STATE_TOKEN: ${{ steps.writer.outputs.token }}
+          REPOSITORY: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+        run: node scripts/promote-main.mjs

@@ -1,0 +1,15 @@
+name: PR 상태 변경 알림
+run-name: ${{ github.event.action == 'edited' && !github.event.changes.base && 'PR 설명 편집' || 'PR 상태 변경' }}
+on:
+  pull_request:
+    types: [opened, closed, reopened, synchronize, edited, labeled, unlabeled]
+permissions: {}
+jobs:
+  signal:
+    if: >-
+      github.event.pull_request.head.repo.id == github.event.repository.id &&
+      (github.event.action != 'edited' || github.event.changes.base != null)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - run: echo '기본 브랜치의 상태 조정기가 현재 PR을 다시 조회합니다.'

@@ -39,3 +39,17 @@ for invalid in 'image.digest=' 'image.digest=latest' 'preview.prNumber=' \
 done
 
 helm template preview-local "$chart" -f "$chart/values-local.yaml" >/dev/null
+for switch in 'preview.local=false' 'ingress.enabled=false'; do
+  if helm template preview-local "$chart" -f "$chart/values-local.yaml" --set-string "$switch" >/dev/null 2>&1; then
+    echo "Chart accepted a string as a boolean: $switch" >&2; exit 1
+  fi
+done
+# Helm removes explicit null values while merging, before it checks the schema.
+for key in preview ingress preview.local ingress.enabled; do
+  if error=$(helm template preview-local "$chart" -f "$chart/values-local.yaml" --set "$key=null" 2>&1); then
+    echo "Chart accepted a missing setting: $key" >&2; exit 1
+  fi
+  if [[ "$error" != *schema* ]]; then echo "$error" >&2; exit 1; fi
+done
+make -n build load lint deploy test clean >/dev/null
+python3 -B -O tests/local-preview.py
